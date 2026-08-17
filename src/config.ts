@@ -121,6 +121,9 @@ const Schema = z.object({
   EMAIL_FROM: str('support@chatbucket.business'),
   EMAIL_FROM_NAME: str('ChatBucket'),
   SUPPORT_EMAIL: str('support@chatbucket.business'),
+  // Where demo-request notifications go. Unset means the lead is still stored
+  // and acknowledged — only the internal notification is skipped.
+  SALES_EMAIL: str(),
 
   // --- SMS / phone verification -------------------------------------------
   // An Indian number verifies by SMS and is sent no email code; every other
@@ -149,6 +152,14 @@ const Schema = z.object({
 
   // --- Links used in emails -----------------------------------------------
   FRONTEND_URL: str('http://localhost:3000'),
+  // Paths appended to FRONTEND_URL / MARKETING_URL to build the links every
+  // template shows. Configurable because the site owns its own routing — a
+  // hardcoded /dashboard breaks silently the day the frontend renames it.
+  DASHBOARD_PATH: str('/dashboard'),
+  LOGIN_PATH: str('/login'),
+  TRACK_QUERY_PATH: str('/support/tickets'),
+  PRIVACY_POLICY_PATH: str('/privacy-policy'),
+  TERMS_PATH: str('/terms-of-service'),
   MARKETING_URL: str('https://chatbucket.business'),
   DISPLAY_TIMEZONE: str('Asia/Kolkata'),
   TERMS_VERSION: str('2025-01-01'),

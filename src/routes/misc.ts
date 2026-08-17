@@ -13,6 +13,11 @@ import { demoRequestsCollection, subscriptionsCollection } from '../database.js'
 import { asyncHandler } from '../errors.js';
 import * as ratelimit from '../middleware/ratelimit.js';
 import { rateCard } from '../pricing.js';
+import {
+  sendContactReceived,
+  sendDemoRequestNotification,
+  sendSubscriptionConfirmation,
+} from '../services/email.js';
 import { email } from '../schemas/auth.js';
 
 // --- Pricing ----------------------------------------------------------------
@@ -87,6 +92,14 @@ demoRouter.post(
     // whatever CRM consumes these rather than in a 409 that loses the request.
     const result = await demoRequestsCollection().insertOne(document);
 
+    // Notify sales *and* acknowledge to the person who wrote in, both after the
+    // response: the lead is already safely stored, so a mail outage must not
+    // fail the submission and lose it. The lead id doubles as the query id the
+    // acknowledgement tells them to quote.
+    const lead = { ...document, _id: result.insertedId };
+    void sendDemoRequestNotification(lead);
+    void sendContactReceived(lead);
+
     res.status(201).json({
       status: true,
       message: "Thanks — we'll be in touch to schedule your demo.",
@@ -140,6 +153,10 @@ subscriptionsRouter.post(
       }
       throw err;
     }
+
+    // Only on a genuinely new subscription — the duplicate paths above return
+    // before this, so re-submitting the form does not re-send the confirmation.
+    void sendSubscriptionConfirmation(payload.email);
 
     res.status(201).json({
       status: true,
