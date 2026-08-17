@@ -85,8 +85,7 @@ two can be compared request by request.
 
 ```bash
 npm run typecheck         # tsc --noEmit, strict
-npm run test:parity       # 19 checks: cross-language crypto compatibility
-npm test                  # 37 checks: end-to-end against a real MongoDB
+npm run test:all          # all five suites (284 checks)
 npm run build && npm start
 ```
 
@@ -97,24 +96,39 @@ and a mock that reimplemented those would be testing the mock.
 
 ---
 
-## What is ported
+## Module layout
 
 ```
 src/
-  config.ts                 The ONLY module that reads process.env
-  logger.ts                 Level-aware logging + log-injection guard
-  errors.ts                 HttpError, FastAPI-shaped 422s, asyncHandler
-  money.ts                  Decimal / Decimal128 / number — the three edges
-  security.ts               Passwords, JWT, API keys, OTP hashing
-  database.ts               Connection, collections, every index
-  serialization.ts          publicUser (allow-list, never deny-list)
-  schemas/auth.ts           zod bodies, E.164 normalisation, aliasing
-  middleware/ratelimit.ts   Counted in Mongo, so it holds across workers
+  config.ts            The ONLY module that reads process.env
+  logger.ts            Level-aware logging + log-injection guard
+  errors.ts            HttpError, FastAPI-shaped 422s, asyncHandler
+  money.ts             Decimal / Decimal128 / number — the three edges
+  security.ts          Passwords, JWT, API keys, OTP hashing
+  database.ts          Connection, collections, every index
+  serialization.ts     publicUser (allow-list, never deny-list)
+  plans.ts             Plan catalogue
+  pricing.ts           Rate card, per-model rates, split pricing
+  engines.ts           Engine registry (upstreams are never named)
+  emailtemplates.ts    The Mustache subset + shared template values
+  templates/emails/    The 13 designed HTML files, byte-identical to Python's
+  schemas/auth.ts      zod bodies, E.164 normalisation, aliasing
+  middleware/
+    auth.ts            Bearer JWT, X-API-Key, and either-of for metering
+    ratelimit.ts       Counted in Mongo, so it holds across workers
+    secret.ts          Shared-secret guards: fail closed, compare constant-time
   services/
-    sms.ts                  The one place a text is sent; DLT rules
-    verification.ts         Channel rule + pre-registration phone proof
-    credits.ts              Atomic debit, ledger on every movement
-  routes/auth.ts            register, login, verify-phone, verify-phone/resend
+    email.ts           The one place mail is sent
+    sms.ts             The one place a text is sent; DLT rules
+    payments.ts        The gateway seam; two signatures, two secrets
+    verification.ts    Channel rule + pre-registration phone proof
+    credits.ts         Atomic debit, ledger on every movement
+    invoices.ts        Numbering, billing snapshot, tax deliberately uncomputed
+    sessions.ts        Refresh rotation with reuse detection
+    reports.ts         The monthly report's arithmetic
+    notifications.ts   Lifecycle jobs, send-once, the scheduler
+    status.ts          Status registry and the staleness rule
+  routes/              One file per router
 ```
 
 ### Behaviour carried over that is easy to lose
