@@ -9,6 +9,7 @@ import { createApp } from './app.js';
 import { getSettings } from './config.js';
 import { connect, disconnect, ensureIndexes } from './database.js';
 import { logger } from './logger.js';
+import { schedulerLoop, stopScheduler } from './services/notifications.js';
 import { warmPasswordHasher } from './security.js';
 
 async function main(): Promise<void> {
@@ -20,6 +21,15 @@ async function main(): Promise<void> {
   // dummy hash, on the request.
   await warmPasswordHasher();
 
+  // OFF by default: turning the scheduler on is a decision to start mailing
+  // customers, and it must never happen merely because a service booted. Not
+  // awaited — it runs for the life of the process.
+  if (s.NOTIFICATION_SCHEDULER_ENABLED) {
+    void schedulerLoop();
+  } else {
+    logger.info('notification scheduler is off (NOTIFICATION_SCHEDULER_ENABLED)');
+  }
+
   const server = createApp().listen(s.PORT, () => {
     logger.info('listening on http://127.0.0.1:%d (%s)', s.PORT, s.ENVIRONMENT);
   });
@@ -27,6 +37,7 @@ async function main(): Promise<void> {
   // Finish in-flight requests before exiting, so a deploy does not drop them.
   const shutdown = (signal: string) => {
     logger.info('%s received, shutting down', signal);
+    stopScheduler();
     server.close(() => {
       void disconnect().finally(() => process.exit(0));
     });

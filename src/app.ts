@@ -15,6 +15,7 @@ import { apiKeysRouter } from './routes/apiKeys.js';
 import { authRouter } from './routes/auth.js';
 import { billingRouter } from './routes/billing.js';
 import { limitsRouter } from './routes/limits.js';
+import { notificationsRouter } from './routes/notifications.js';
 import { demoRouter, pricingRouter, subscriptionsRouter } from './routes/misc.js';
 import { profileRouter } from './routes/profile.js';
 import { projectsRouter } from './routes/projects.js';
@@ -81,6 +82,7 @@ export function createApp(): Express {
   app.use('/pricing', pricingRouter);
   app.use('/demo-requests', demoRouter);
   app.use('/subscriptions', subscriptionsRouter);
+  app.use('/notifications', notificationsRouter);
 
   app.use((_req, res) => {
     res.status(404).json({ detail: 'Not found.' });

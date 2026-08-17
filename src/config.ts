@@ -88,6 +88,26 @@ const Schema = z.object({
   // on an N-worker deployment.
   ENFORCE_PLAN_RATE_LIMITS: boolish(true),
 
+  // --- Lifecycle notifications ---------------------------------------------
+  // How many days before the promised free-credit window closes to write.
+  FREE_CREDIT_REMINDER_DAYS: intish(7, 1),
+  // How long after signup an account that never called the API gets a nudge.
+  ONBOARDING_NUDGE_AFTER_DAYS: intish(3, 1),
+  VERIFICATION_REMINDER_AFTER_HOURS: intish(24, 1),
+  // A ceiling on any one broadcast, so a bug cannot mail the whole base twice.
+  BROADCAST_MAX_RECIPIENTS: intish(5000, 1),
+  // Recipients are worked in batches of this size. Opening one SMTP connection
+  // per customer in parallel is the quickest route to a throttled domain.
+  BROADCAST_CONCURRENCY: intish(5, 1, 50),
+  // OFF by default: turning the scheduler on is a decision to start mailing
+  // customers, and it should never happen merely because a service booted.
+  NOTIFICATION_SCHEDULER_ENABLED: boolish(false),
+  NOTIFICATION_SCHEDULER_INTERVAL_SECONDS: intish(900, 60),
+  // Local to DISPLAY_TIMEZONE, not UTC: "6am" means the customer's 6am.
+  NOTIFICATION_SCHEDULER_HOUR: intish(6, 0, 23),
+  // Capped at 28 so the monthly report has a valid day in February.
+  NOTIFICATION_MONTHLY_REPORT_DAY: intish(1, 1, 28),
+
   // --- Billing -------------------------------------------------------------
   // Guards the payment-confirmation webhook. UNSET MEANS THE ROUTE REFUSES
   // EVERYTHING (503) rather than accepting anything — an unset secret must not
