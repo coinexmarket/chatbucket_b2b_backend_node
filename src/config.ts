@@ -69,12 +69,24 @@ const Schema = z.object({
   VERIFICATION_TOKEN_EXPIRE_HOURS: intish(48, 1),
   EMAIL_OTP_EXPIRE_MINUTES: intish(10, 1, 60),
   EMAIL_OTP_MAX_ATTEMPTS: intish(5, 1, 20),
+  // Short by design: a reset link is a password in the post. Long enough to
+  // find the mail, short enough that one sitting in an abandoned inbox is not
+  // still usable next week.
+  RESET_TOKEN_EXPIRE_MINUTES: intish(60, 1),
 
   // --- Credits ------------------------------------------------------------
   // Granted on signup. A string, not a number: it is an exact money amount and
   // must not go anywhere near a binary float on the way in.
   SIGNUP_BONUS_CREDITS: str('100'),
   FREE_CREDIT_VALIDITY_DAYS: intish(30, 1),
+  // Whether a metered call is refused when the balance cannot cover it. Off
+  // means the balance is allowed to go negative — the consumption happened
+  // either way, and a negative balance is the honest record of it.
+  ENFORCE_CREDIT_BALANCE: boolish(true),
+  // Counted per (account, service) in Mongo, so the ceiling holds across worker
+  // processes — an in-process counter would give a customer N times the limit
+  // on an N-worker deployment.
+  ENFORCE_PLAN_RATE_LIMITS: boolish(true),
 
   // --- CORS ---------------------------------------------------------------
   // Exact origins only. `allow_credentials` is on, so a permissive value here

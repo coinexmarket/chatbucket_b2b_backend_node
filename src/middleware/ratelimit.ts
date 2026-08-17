@@ -32,8 +32,14 @@ interface Limit {
 export const LIMITS: Record<string, Limit> = {
   login_ip: { max: 20, windowSeconds: 900 },
   register_ip: { max: 10, windowSeconds: 3600 },
-  forgot_password_ip: { max: 5, windowSeconds: 3600 },
+  forgot_ip: { max: 5, windowSeconds: 3600 },
+  // Per address as well as per IP, so this cannot be used to mail-bomb someone.
+  // Applied before the account lookup, so the limit is identical whether or not
+  // the address exists — one that only bit real accounts would itself leak
+  // which addresses are registered.
+  forgot_email: { max: 3, windowSeconds: 3600 },
 
+  verify_otp_ip: { max: 30, windowSeconds: 900 },
   verify_email_ip: { max: 30, windowSeconds: 900 },
   verify_email_address: { max: 10, windowSeconds: 900 },
 

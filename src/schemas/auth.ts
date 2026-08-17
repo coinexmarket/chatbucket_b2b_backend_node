@@ -126,6 +126,45 @@ export const VerifyEmailOtpRequest = z
   .object({ email, code: z.string().regex(/^\d{6}$/, 'Enter the six-digit code.') })
   .strict();
 
+export const ForgotPasswordRequest = z.object({ email }).strict();
+
+export const ResetPasswordRequest = withAliases(
+  z
+    .object({
+      token: z.string().min(1),
+      newPassword: z.string().min(8, 'Password must be at least 8 characters.').max(128),
+    })
+    .strict(),
+  { new_password: 'newPassword' },
+);
+
+export const VerifyEmailRequest = z.object({ token: z.string().min(1) }).strict();
+
+export const RefreshRequest = withAliases(
+  z.object({ refreshToken: z.string().min(1) }).strict(),
+  { refresh_token: 'refreshToken' },
+);
+
+export const LogoutRequest = withAliases(
+  z
+    .object({
+      refreshToken: z.string().min(1).optional(),
+      allSessions: z.boolean().default(false),
+    })
+    .strict(),
+  { refresh_token: 'refreshToken', all_sessions: 'allSessions' },
+);
+
+export const ChangePasswordRequest = withAliases(
+  z
+    .object({
+      currentPassword: z.string().min(1),
+      newPassword: z.string().min(8, 'Password must be at least 8 characters.').max(128),
+    })
+    .strict(),
+  { current_password: 'currentPassword', new_password: 'newPassword' },
+);
+
 export const ProfileUpdateRequest = z
   .object({
     name: z.string().min(1).max(120).optional(),

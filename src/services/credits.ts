@@ -1,127 +1,214 @@
 /**
- * Credit accounts and the ledger.
+ * Credit balances and the append-only credit ledger.
  *
- * Ported from `app/credits.py`. Two invariants carry over and neither is
- * negotiable:
+ * Ported from `app/credits.py`. Credits are the account's prepaid spending
+ * power: 1 credit = ₹1, so a usage record costing ₹5.20 debits 5.2 credits.
  *
- *   1. **A balance is never written from a value read earlier.** Debits are a
- *      single `findOneAndUpdate` with `$gte` in the filter and `$inc` in the
- *      update, so the check and the decrement are one atomic operation. Read,
- *      compare in the app, then write would let two concurrent requests each see
- *      a sufficient balance and both spend it.
- *   2. **Every movement writes a ledger row.** A balance with no explanation is
- *      unauditable, and "why was I charged" is a question support must be able to
- *      answer.
+ * **Balances are stored as integer minor units**, not `Decimal128`. 1 credit =
+ * `UNITS_PER_CREDIT` units, matching the 4dp `money.ts` works to, so the value
+ * is exact. Integers are used because the overspend guard depends on comparing
+ * and incrementing the balance *inside a single Mongo update* — `{$gte: n}` plus
+ * `{$inc: -n}` — and that has to be atomic to be correct under concurrent
+ * requests. Two simultaneous calls against a balance of 5 must not both succeed
+ * in spending 5. (`$gte` against a `Decimal128` would also work in Mongo, but
+ * the Python service stores integers and both must agree — see below.)
  *
- * Amounts are stored as `Decimal128` and handled as `Decimal` — see `money.ts`
- * for why a float here would be a billing bug.
+ * The field names here are **not** a free choice. Both services read and write
+ * the same documents during the cutover, so `balance_units`,
+ * `lifetime_purchased_units`, `units` and `balance_after_units` must match
+ * `credits.py` exactly. An earlier draft of this file invented a Decimal128
+ * `balance` field; it passed its own tests and would have produced accounts the
+ * Python service read as having a zero balance.
+ *
+ * Two collections:
+ *   credit_accounts — one document per user with the authoritative balance;
+ *   credit_ledger   — append-only history of every movement.
+ *
+ * The balance is the authority, not a sum of the ledger: summing an ever-growing
+ * ledger on every metered call would get slower for exactly the customers who
+ * use the service most.
  */
 import type { ObjectId } from 'mongodb';
 
 import { creditAccountsCollection, creditLedgerCollection } from '../database.js';
-import { Decimal, toBson, toDecimal, type AmountLike } from '../money.js';
 import { logger } from '../logger.js';
+import { Decimal, quantize, toDecimal, type AmountLike } from '../money.js';
 
+/** 4 decimal places, the same precision `money.quantize` works to. */
+export const UNITS_PER_CREDIT = 10_000;
+
+export const KIND_PURCHASE = 'purchase';
 export const KIND_SIGNUP_BONUS = 'signup_bonus';
-export const KIND_TOPUP = 'topup';
 export const KIND_USAGE = 'usage';
 export const KIND_ADJUSTMENT = 'adjustment';
+export const KIND_REFUND = 'refund';
 
-/** Open the account if it does not exist yet, and return it. */
+/** Credits -> integer minor units, exactly. */
+export function toUnits(credits: AmountLike): number {
+  return quantize(credits).times(UNITS_PER_CREDIT).toNumber();
+}
+
+/** Integer minor units -> credits. */
+export function fromUnits(units: number): Decimal {
+  return quantize(new Decimal(units).dividedBy(UNITS_PER_CREDIT));
+}
+
+/**
+ * The user's credit account, creating an empty one on first touch.
+ *
+ * Upserted rather than created at registration, so accounts that predate billing
+ * behave identically to new ones.
+ */
 export async function getAccount(userId: ObjectId): Promise<Record<string, unknown>> {
-  const now = new Date();
-  const doc = await creditAccountsCollection().findOneAndUpdate(
+  await creditAccountsCollection().updateOne(
     { user_id: userId },
     {
       $setOnInsert: {
         user_id: userId,
-        balance: toBson(0),
-        created_at: now,
-        updated_at: now,
+        balance_units: 0,
+        lifetime_purchased_units: 0,
+        auto_recharge: { enabled: false, threshold_credits: null, amount_inr: null },
+        created_at: new Date(),
       },
     },
-    { upsert: true, returnDocument: 'after' },
+    { upsert: true },
   );
-  return doc as Record<string, unknown>;
+  return (await creditAccountsCollection().findOne({ user_id: userId })) ?? {};
+}
+
+export async function balanceUnits(userId: ObjectId): Promise<number> {
+  const account = await getAccount(userId);
+  return Number(account['balance_units'] ?? 0);
 }
 
 export async function balanceOf(userId: ObjectId): Promise<Decimal> {
-  const account = await getAccount(userId);
-  return toDecimal((account['balance'] ?? 0) as AmountLike);
+  return fromUnits(await balanceUnits(userId));
 }
 
-/**
- * Add credit and record why.
- *
- * `$inc` on a `Decimal128` rather than a computed absolute value, so two grants
- * landing at once both count instead of one overwriting the other.
- */
+async function appendLedger(
+  userId: ObjectId,
+  units: number,
+  kind: string,
+  description: string,
+  balanceAfter: number,
+  ref: unknown = null,
+): Promise<Record<string, unknown>> {
+  const entry: Record<string, unknown> = {
+    user_id: userId,
+    kind,
+    units, // signed: negative for spend
+    balance_after_units: balanceAfter,
+    description,
+    ref,
+    created_at: new Date(),
+  };
+  const result = await creditLedgerCollection().insertOne(entry);
+  entry['_id'] = result.insertedId;
+  return entry;
+}
+
+/** Add credits. Returns the ledger entry. */
 export async function grant(
   userId: ObjectId,
-  amount: AmountLike,
+  units: number,
   kind: string,
   description: string,
-): Promise<Decimal> {
-  const value = toDecimal(amount);
-  if (value.lessThanOrEqualTo(0)) {
-    throw new Error('A grant must be a positive amount.');
-  }
-  const now = new Date();
+  ref: unknown = null,
+): Promise<Record<string, unknown>> {
+  if (units <= 0) throw new Error('grant requires a positive number of units');
 
-  // Ensure the account exists before incrementing it.
   await getAccount(userId);
-  const updated = await creditAccountsCollection().findOneAndUpdate(
+  const inc: Record<string, number> = { balance_units: units };
+  if (kind === KIND_PURCHASE) inc['lifetime_purchased_units'] = units;
+
+  const account = await creditAccountsCollection().findOneAndUpdate(
     { user_id: userId },
-    { $inc: { balance: toBson(value) }, $set: { updated_at: now } },
+    { $inc: inc },
     { returnDocument: 'after' },
   );
-
-  await creditLedgerCollection().insertOne({
-    user_id: userId,
+  return appendLedger(
+    userId,
+    units,
     kind,
     description,
-    amount: toBson(value),
-    balance_after: updated?.['balance'] ?? toBson(value),
-    created_at: now,
-  });
-
-  return toDecimal((updated?.['balance'] ?? value) as AmountLike);
+    Number(account?.['balance_units'] ?? units),
+    ref,
+  );
 }
 
 /**
- * Spend credit, or return null if the balance is insufficient.
+ * Spend credits if the balance covers it. Returns the ledger entry, or null.
  *
- * The `$gte` guard lives **in the filter**, so the balance check and the
- * decrement are one atomic step and the balance can never go negative — not even
- * under two simultaneous requests that each saw enough credit a moment earlier.
+ * The balance check and the decrement are a single conditional update, so two
+ * concurrent calls cannot both pass a check that only one balance can satisfy.
+ * Read-then-write would let them.
  */
-export async function debit(
+export async function tryDebit(
   userId: ObjectId,
-  amount: AmountLike,
-  kind: string,
+  units: number,
   description: string,
-): Promise<Decimal | null> {
-  const value = toDecimal(amount);
-  if (value.lessThanOrEqualTo(0)) throw new Error('A debit must be a positive amount.');
+  ref: unknown = null,
+): Promise<Record<string, unknown> | null> {
+  if (units < 0) throw new Error('tryDebit requires a non-negative number of units');
 
-  const now = new Date();
-  const updated = await creditAccountsCollection().findOneAndUpdate(
-    { user_id: userId, balance: { $gte: toBson(value) } },
-    { $inc: { balance: toBson(value.negated()) }, $set: { updated_at: now } },
+  await getAccount(userId);
+  const account = await creditAccountsCollection().findOneAndUpdate(
+    { user_id: userId, balance_units: { $gte: units } },
+    { $inc: { balance_units: -units } },
     { returnDocument: 'after' },
   );
-  if (!updated) return null; // Insufficient balance — nothing was written.
+  if (!account) return null; // insufficient balance; nothing was deducted
 
-  await creditLedgerCollection().insertOne({
-    user_id: userId,
-    kind,
+  // The decrement above is the authoritative step and has already happened. If
+  // this append fails the customer is charged with no ledger line, so it is
+  // logged loudly rather than swallowed — the balance is still correct.
+  try {
+    return await appendLedger(
+      userId,
+      -units,
+      KIND_USAGE,
+      description,
+      Number(account['balance_units'] ?? 0),
+      ref,
+    );
+  } catch (err) {
+    logger.error(
+      'debited %d units from %s but failed to write the ledger entry: %s',
+      units,
+      String(userId),
+      err instanceof Error ? err.message : err,
+    );
+    throw err;
+  }
+}
+
+/**
+ * Spend credits without a balance check, letting the balance go negative.
+ *
+ * Used only when the deployment has chosen never to refuse a metered call. The
+ * consumption still happened, so the ledger and balance must still record it — a
+ * negative balance is the honest statement of what was allowed through unpaid.
+ */
+export async function debitAllowingNegative(
+  userId: ObjectId,
+  units: number,
+  description: string,
+  ref: unknown = null,
+): Promise<Record<string, unknown>> {
+  await getAccount(userId);
+  const account = await creditAccountsCollection().findOneAndUpdate(
+    { user_id: userId },
+    { $inc: { balance_units: -units } },
+    { returnDocument: 'after' },
+  );
+  return appendLedger(
+    userId,
+    -units,
+    KIND_USAGE,
     description,
-    amount: toBson(value.negated()),
-    balance_after: updated['balance'],
-    created_at: now,
-  });
-
-  return toDecimal(updated['balance'] as AmountLike);
+    Number(account?.['balance_units'] ?? 0),
+    ref,
+  );
 }
 
 /**
@@ -133,22 +220,22 @@ export async function debit(
  */
 export async function openForSignup(
   userId: ObjectId,
-  bonus: string,
-): Promise<Decimal | null> {
+  bonusCredits: string,
+): Promise<number> {
   try {
-    const amount = toDecimal(bonus || '0');
-    if (amount.greaterThan(0)) {
-      await grant(userId, amount, KIND_SIGNUP_BONUS, 'Welcome credits');
-      return amount;
+    const units = toUnits(bonusCredits || '0');
+    if (units > 0) {
+      await grant(userId, units, KIND_SIGNUP_BONUS, 'Welcome credits');
+      return units;
     }
     await getAccount(userId);
-    return null;
+    return 0;
   } catch (err) {
     logger.error(
       'could not open credit account for %s: %s',
       String(userId),
       err instanceof Error ? err.message : err,
     );
-    return null;
+    return 0;
   }
 }

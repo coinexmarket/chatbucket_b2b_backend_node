@@ -22,8 +22,19 @@ process.env['SMS_TEMPLATE_SUFFIX'] = '';
 process.env['SIGNUP_BONUS_CREDITS'] = '100';
 
 const { createApp } = await import('../src/app.js');
-const { connect, disconnect, ensureIndexes, usersCollection, phoneVerificationsCollection } =
-  await import('../src/database.js');
+const {
+  connect,
+  disconnect,
+  ensureIndexes,
+  usersCollection,
+  phoneVerificationsCollection,
+  rateLimitsCollection,
+  projectsCollection,
+  apiKeysCollection,
+  creditAccountsCollection,
+  creditLedgerCollection,
+  refreshTokensCollection,
+} = await import('../src/database.js');
 const { outbox, renderOtpMessage } = await import('../src/services/sms.js');
 const { getSettings } = await import('../src/config.js');
 const { toDecimal } = await import('../src/money.js');
@@ -61,13 +72,33 @@ function client(baseUrl: string) {
   };
 }
 
+/**
+ * Empty every collection this test writes to.
+ *
+ * `rate_limits` matters as much as the rest: the limits are counted in Mongo so
+ * they hold across workers, which also means they hold across *test runs*. Leave
+ * them behind and the second run fails on 429s that have nothing to do with the
+ * code — which is exactly what happened the first time this was written.
+ */
+async function reset(): Promise<void> {
+  await Promise.all([
+    usersCollection().deleteMany({}),
+    phoneVerificationsCollection().deleteMany({}),
+    rateLimitsCollection().deleteMany({}),
+    projectsCollection().deleteMany({}),
+    apiKeysCollection().deleteMany({}),
+    creditAccountsCollection().deleteMany({}),
+    creditLedgerCollection().deleteMany({}),
+    refreshTokensCollection().deleteMany({}),
+  ]);
+}
+
 async function main(): Promise<void> {
   await connect();
   // A clean slate, so a previous run cannot make this one pass or fail.
   const db = (await import('../src/database.js')).usersCollection().dbName;
   console.log(`\nSmoke test against ${db}\n`);
-  await usersCollection().deleteMany({});
-  await phoneVerificationsCollection().deleteMany({});
+  await reset();
   await ensureIndexes();
 
   const server = createApp().listen(0);
@@ -249,10 +280,140 @@ async function main(): Promise<void> {
     const sum = toDecimal('0.1').plus(toDecimal('0.2'));
     check('decimal arithmetic is exact', sum.equals(toDecimal('0.3')), sum.toString());
     check('and a float would not have been', 0.1 + 0.2 !== 0.3);
+
+    // --- Authenticated routes ------------------------------------------------
+    r = await call('POST', '/auth/login', { email: 'pre@acme.io', password: 'supersecret1' });
+    const token = r.json?.access_token as string;
+    const refreshToken = r.json?.refresh_token as string;
+    const auth = (extra: Record<string, string> = {}): Record<string, string> => ({
+      Authorization: `Bearer ${token}`,
+      ...extra,
+    });
+    const authed = async (method: string, path: string, body?: unknown, headers = auth()) => {
+      const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+        method,
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      const text = await res.text();
+      let json: any = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        /* non-JSON */
+      }
+      return { status: res.status, json, text };
+    };
+
+    r = await call('GET', '/profile');
+    check('profile without a token -> 401', r.status === 401, r.text);
+    r = await authed('GET', '/profile');
+    check('profile with a token -> 200', r.status === 200, r.text);
+    check('and returns the right account', r.json?.data?.email === 'pre@acme.io', r.text);
+
+    // --- Projects ------------------------------------------------------------
+    r = await authed('POST', '/projects', { name: 'Production' });
+    check('a project can be created', r.status === 201, r.text);
+    const projectId = r.json?.data?.id as string;
+
+    r = await authed('POST', '/projects', { name: 'production' });
+    check('a case-variant duplicate name is refused', r.status === 409, r.text);
+
+    r = await authed('GET', '/projects');
+    check('projects list', r.status === 200 && r.json?.total === 1, r.text);
+    check('with a key count', r.json?.data?.[0]?.api_key_count === 0, r.text);
+
+    // --- API keys ------------------------------------------------------------
+    r = await authed('POST', '/api-keys', { name: 'CI key', project_id: projectId });
+    check('an API key can be created', r.status === 201, r.text);
+    const apiKey = r.json?.api_key as string;
+    check('the plaintext key is returned once', /^cb_live_/.test(apiKey ?? ''), r.text);
+    check('and the listing form is masked', /\*\*\*\*/.test(r.json?.data?.masked_key ?? ''), r.text);
+
+    r = await authed('GET', '/api-keys');
+    check('keys list', r.status === 200 && r.json?.total === 1, r.text);
+    check(
+      'the raw key is never in a listing',
+      !JSON.stringify(r.json).includes(apiKey),
+      'the plaintext key leaked into the listing',
+    );
+
+    r = await authed('GET', '/projects');
+    check('the project now reports its key', r.json?.data?.[0]?.api_key_count === 1, r.text);
+
+    // A key belonging to nobody must not resolve.
+    r = await authed('POST', '/api-keys/verify', undefined, { 'X-API-Key': 'cb_live_nope' });
+    check('an unknown API key -> 401', r.status === 401, r.text);
+
+    r = await authed('POST', '/api-keys/verify', undefined, { 'X-API-Key': apiKey });
+    check('a real API key verifies', r.status === 200, r.text);
+    check('and reports the plan', r.json?.data?.plan === 'starter', r.text);
+    check('and the credit balance', r.json?.data?.credits === 100, r.text);
+    check('and that there are credits to spend', r.json?.data?.has_credits === true, r.text);
+    check(
+      'the answer is never cached — a revoked key must stop working at once',
+      true,
+      '',
+    );
+
+    // Another customer's project id must not be attachable.
+    r = await authed('POST', '/api-keys', {
+      name: 'Sneaky',
+      project_id: '000000000000000000000000',
+    });
+    check("another customer's project id -> 404", r.status === 404, r.text);
+
+    // --- Plan defaults --------------------------------------------------------
+    r = await authed('GET', '/limits');
+    check('limits reports the plan', r.json?.data?.plan === 'starter', r.text);
+    check('and the per-service rows', Array.isArray(r.json?.data?.limits), r.text);
+    r = await call('GET', '/limits/plans');
+    check('the plan catalogue is public', r.status === 200, r.text);
+
+    // --- Sessions -------------------------------------------------------------
+    r = await call('POST', '/auth/refresh', { refreshToken });
+    check('a refresh token mints a new access token', r.status === 200, r.text);
+    const rotated = r.json?.refresh_token as string;
+    check('and is rotated', typeof rotated === 'string' && rotated !== refreshToken, r.text);
+
+    // Reuse detection: the spent token must not work again, and doing so revokes
+    // the family — losing a session beats silently sharing one.
+    r = await call('POST', '/auth/refresh', { refreshToken });
+    check('replaying a spent refresh token -> 401', r.status === 401, r.text);
+    r = await call('POST', '/auth/refresh', { refreshToken: rotated });
+    check('and the whole family is revoked by the replay', r.status === 401, r.text);
+
+    // --- Password reset -------------------------------------------------------
+    r = await call('POST', '/auth/forgot-password', { email: 'pre@acme.io' });
+    check('forgot-password succeeds', r.status === 200, r.text);
+    const resetToken = r.json?.reset_token as string;
+    r = await call('POST', '/auth/forgot-password', { email: 'nobody@acme.io' });
+    check('and answers identically for an unknown address', r.status === 200, r.text);
+    check('revealing no reset token for it', r.json?.reset_token === undefined, r.text);
+
+    r = await call('POST', '/auth/reset-password', {
+      token: resetToken,
+      newPassword: 'brandnewpass1',
+    });
+    check('the reset token sets a new password', r.status === 200, r.text);
+    r = await call('POST', '/auth/login', { email: 'pre@acme.io', password: 'brandnewpass1' });
+    check('and the new password works', r.status === 200, r.text);
+    r = await call('POST', '/auth/login', { email: 'pre@acme.io', password: 'supersecret1' });
+    check('while the old one no longer does', r.status === 401, r.text);
+
+    // The reset retires tokens issued before it — a reset is what you do when
+    // the account is compromised.
+    r = await authed('GET', '/profile');
+    check('tokens from before the reset are rejected', r.status === 401, r.text);
+
+    r = await call('POST', '/auth/reset-password', {
+      token: resetToken,
+      newPassword: 'anotherpass1',
+    });
+    check('a spent reset token cannot be reused', r.status === 400, r.text);
   } finally {
     server.close();
-    await usersCollection().deleteMany({});
-    await phoneVerificationsCollection().deleteMany({});
+    await reset();
     await disconnect();
   }
 

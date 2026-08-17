@@ -1,0 +1,42 @@
+{
+  "credit_accounts": [
+    "auto_recharge",
+    "balance_units",
+    "created_at",
+    "lifetime_purchased_units",
+    "user_id"
+  ],
+  "credit_ledger": [
+    "balance_after_units",
+    "created_at",
+    "description",
+    "kind",
+    "ref",
+    "units",
+    "user_id"
+  ],
+  "phone_verifications": [
+    "attempts",
+    "code_hash",
+    "created_at",
+    "expires_at",
+    "phone",
+    "purge_at",
+    "updated_at"
+  ],
+  "users": [
+    "company",
+    "created_at",
+    "email",
+    "email_verified",
+    "how_did_you_hear",
+    "name",
+    "password_hash",
+    "phone",
+    "plan",
+    "terms_accepted_at",
+    "terms_version",
+    "token_version",
+    "updated_at"
+  ]
+}

@@ -131,10 +131,45 @@ export async function ensureIndexes(): Promise<void> {
 
   await usageCollection().createIndex({ user_id: 1, created_at: -1 });
   await usageCollection().createIndex({ service: 1 });
+  // Backs the per-model breakdown and the `?model=` filter. Partial because
+  // records from callers that never report a model would otherwise all index
+  // a null.
+  await usageCollection().createIndex(
+    { user_id: 1, model_key: 1 },
+    { partialFilterExpression: { model_key: { $type: 'string' } } },
+  );
+  // Makes `POST /usage` retries safe: one usage record per (customer, key).
+  // Scoped per user so two customers can pick the same key, and partial so the
+  // many records sent without a key never collide with each other.
+  await usageCollection().createIndex(
+    { user_id: 1, idempotency_key: 1 },
+    { unique: true, partialFilterExpression: { idempotency_key: { $exists: true } } },
+  );
+  await usageCollection().createIndex(
+    { user_id: 1, project_id: 1 },
+    { partialFilterExpression: { project_id: { $type: 'string' } } },
+  );
 
+  // Project names are unique per customer (on the case-folded key), so a second
+  // "Production" is rejected rather than creating a confusing twin.
+  await projectsCollection().createIndex({ user_id: 1, name_key: 1 }, { unique: true });
+
+  // One credit account per user; unique so a race on first touch cannot create
+  // two balances for the same customer.
   await creditAccountsCollection().createIndex({ user_id: 1 }, { unique: true });
   await creditLedgerCollection().createIndex({ user_id: 1, created_at: -1 });
   await paymentsCollection().createIndex({ user_id: 1, created_at: -1 });
+  // Set by the gateway webhook; unique so a redelivered callback cannot credit
+  // the same payment twice. Webhooks arrive keyed by order id, so two local
+  // payments sharing one order would be ambiguous.
+  await paymentsCollection().createIndex(
+    { provider_order_id: 1 },
+    { unique: true, partialFilterExpression: { provider_order_id: { $exists: true } } },
+  );
+  await paymentsCollection().createIndex(
+    { provider_payment_id: 1 },
+    { unique: true, partialFilterExpression: { provider_payment_id: { $exists: true } } },
+  );
 
   await invoicesCollection().createIndex({ invoice_number: 1 }, { unique: true });
   await invoicesCollection().createIndex({ user_id: 1, issued_at: -1 });
