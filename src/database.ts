@@ -18,10 +18,17 @@ interface State {
   client: MongoClient | null;
   b2b: Db | null;
   blog: Db | null;
+  contest: Db | null;
   indexesReady: boolean;
 }
 
-const state: State = { client: null, b2b: null, blog: null, indexesReady: false };
+const state: State = {
+  client: null,
+  b2b: null,
+  blog: null,
+  contest: null,
+  indexesReady: false,
+};
 
 export async function connect(): Promise<void> {
   if (state.client) return;
@@ -34,6 +41,7 @@ export async function connect(): Promise<void> {
   state.client = client;
   state.b2b = client.db(s.MONGODB_DB);
   state.blog = client.db(s.MONGODB_BLOG_DB);
+  state.contest = client.db(s.MONGODB_CONTEST_DB);
   logger.info('mongodb connected (db: %s)', s.MONGODB_DB);
 }
 
@@ -42,6 +50,7 @@ export async function disconnect(): Promise<void> {
   state.client = null;
   state.b2b = null;
   state.blog = null;
+  state.contest = null;
   state.indexesReady = false;
 }
 
@@ -53,6 +62,11 @@ function b2bDb(): Db {
 function blogDb(): Db {
   if (!state.blog) throw new Error('MongoDB not connected. Did startup run?');
   return state.blog;
+}
+
+function contestDb(): Db {
+  if (!state.contest) throw new Error('MongoDB not connected. Did startup run?');
+  return state.contest;
 }
 
 /** Test hook: point the accessors at an already-open database. */
@@ -95,6 +109,10 @@ export const serviceStatusDaysCollection = (): Collection<Document> =>
   b2bDb().collection('service_status_days');
 
 export const blogsCollection = (): Collection<Document> => blogDb().collection('blogs');
+export const categoriesCollection = (): Collection<Document> =>
+  blogDb().collection('categories');
+export const contestRegistrationsCollection = (): Collection<Document> =>
+  contestDb().collection('contest_registrations');
 
 /**
  * A mobile number proven **before** an account exists for it.

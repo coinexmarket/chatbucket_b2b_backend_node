@@ -57,6 +57,9 @@ const Schema = z.object({
   MONGODB_URI: str('mongodb://127.0.0.1:27017'),
   MONGODB_DB: str('chatbucket_b2b'),
   MONGODB_BLOG_DB: str('chatbucket'),
+  // The hackathon registrations live in their own database, matching what the
+  // existing site already writes.
+  MONGODB_CONTEST_DB: str('ChatBucketHackathon'),
 
   // --- Tokens -------------------------------------------------------------
   JWT_SECRET: str('dev-secret-change-me'),
@@ -115,6 +118,18 @@ const Schema = z.object({
   BILLING_WEBHOOK_SECRET: str(),
   INVOICE_NUMBER_PREFIX: str('INV-'),
   INVOICE_NUMBER_PADDING: intish(4, 1, 12),
+  // The payment gateway. Unset means no order is created and the top-up is
+  // recorded locally only, which is how the service works without a gateway.
+  RAZORPAY_KEY_ID: str(),
+  RAZORPAY_KEY_SECRET: str(),
+  // A DIFFERENT secret from the key secret. Signing a webhook against the wrong
+  // one rejects every delivery.
+  RAZORPAY_WEBHOOK_SECRET: str(),
+  RAZORPAY_TIMEOUT_SECONDS: intish(20, 1),
+  // Engine allowances, as comma-separated `engine=amount` pairs. Ships EMPTY on
+  // purpose: an invented capacity produces a "remaining" figure that reads as
+  // authoritative while being fiction.
+  ENGINE_FREE_QUOTAS: str(),
 
   // --- Machine-facing secrets ----------------------------------------------
   // Each fails CLOSED when unset (503), never open. Anyone able to set a system
@@ -193,6 +208,8 @@ export interface Settings extends RawSettings {
   /** Dial codes that verify by SMS, e.g. `['+91']`. */
   readonly smsCountryCodeList: string[];
   readonly corsOriginList: string[];
+  /** Engine allowances by key, parsed from ENGINE_FREE_QUOTAS. */
+  readonly engineQuotaMap: Record<string, number>;
   /** `SMS_BACKEND` with `auto` resolved against whether a gateway is configured. */
   readonly resolvedSmsBackend: string;
   /** `EMAIL_BACKEND` with `auto` resolved against whether SMTP is configured. */
@@ -236,6 +253,12 @@ function build(): Settings {
     isProduction,
     smsCountryCodeList: splitList(raw.SMS_COUNTRY_CODES),
     corsOriginList: splitList(raw.CORS_ORIGINS),
+    engineQuotaMap: Object.fromEntries(
+      splitList(raw.ENGINE_FREE_QUOTAS)
+        .map((pair) => pair.split('='))
+        .filter((parts) => parts.length === 2 && Number.isFinite(Number(parts[1])))
+        .map(([k, v]) => [String(k).trim().toLowerCase(), Number(v)]),
+    ),
     resolvedSmsBackend,
     resolvedEmailBackend,
   };

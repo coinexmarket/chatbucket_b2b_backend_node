@@ -13,7 +13,7 @@
  */
 import crypto from 'node:crypto';
 
-import { Router, type Request } from 'express';
+import express, { Router, type Request } from 'express';
 import { MongoServerError, ObjectId } from 'mongodb';
 import { z } from 'zod';
 
@@ -33,6 +33,7 @@ import { PURCHASABLE, getPlan } from '../plans.js';
 import { toIso } from '../serialization.js';
 import * as credits from '../services/credits.js';
 import * as invoices from '../services/invoices.js';
+import * as gateway from '../services/payments.js';
 
 export const billingRouter = Router();
 
@@ -320,16 +321,46 @@ billingRouter.post(
     const result = await paymentsCollection().insertOne(document);
     document['_id'] = result.insertedId;
 
+    // Create the matching gateway order, if one is configured. Done AFTER the
+    // local record exists, so a gateway outage leaves a pending top-up to retry
+    // rather than a charge with nothing pointing at it.
+    let checkout: Record<string, unknown> | null = null;
+    let order;
+    try {
+      order = await gateway.createOrder(amount, 'INR', String(document['reference']));
+    } catch (err) {
+      logger.error(
+        'gateway order failed for payment %s: %s',
+        String(document['_id']),
+        err instanceof Error ? err.message : err,
+      );
+      throw new HttpError(502, 'Payment gateway is unavailable. The top-up was not started.');
+    }
+
+    if (order) {
+      await paymentsCollection().updateOne(
+        { _id: document['_id'] as ObjectId },
+        { $set: { provider_order_id: order.id } },
+      );
+      document['provider_order_id'] = order.id;
+      // Everything Checkout needs on the client. The key id is public by
+      // design; the secret never leaves this service.
+      checkout = {
+        provider: 'razorpay',
+        key_id: getSettings().RAZORPAY_KEY_ID,
+        order_id: order.id,
+        amount: order.amount, // paise, as the gateway expects
+        currency: order.currency,
+      };
+    }
+
     // No credits are granted here. The order is what the frontend hands to the
     // gateway; credits appear only when the gateway confirms payment.
     res.status(201).json({
       status: true,
       message: 'Top-up created. Complete payment to receive credits.',
       data: { ...paymentView(document), reference: document['reference'] },
-      // The gateway order is created by the Python service's Razorpay
-      // integration, which is not yet ported — see the README. Until then this
-      // is null and the local pending record is the whole result.
-      checkout: null,
+      checkout,
     });
   }),
 );
@@ -484,6 +515,122 @@ billingRouter.post(
         method: payload.method,
         providerInvoiceId: payload.provider_invoice_id,
         providerInvoiceUrl: payload.provider_invoice_url,
+      }),
+    );
+  }),
+);
+
+const CheckoutResult = z
+  .object({
+    razorpay_order_id: z.string().min(1),
+    razorpay_payment_id: z.string().min(1),
+    razorpay_signature: z.string().min(1),
+  })
+  .strict();
+
+/**
+ * Confirm a top-up from the Checkout callback.
+ *
+ * The three values come back through the customer's browser, so they are
+ * untrusted: the HMAC over `order_id|payment_id` is the only thing that makes
+ * them believable. The order id must **also** match the one this payment was
+ * created with, or a valid signature from someone else's order would settle
+ * this one.
+ */
+billingRouter.post(
+  '/payments/:paymentId/verify',
+  requireUser,
+  asyncHandler(async (req: Request, res) => {
+    const user = (req as AuthedRequest).user;
+    const raw = String(req.params['paymentId']);
+    if (!ObjectId.isValid(raw)) throw new HttpError(404, 'Payment not found.');
+    const oid = new ObjectId(raw);
+
+    // Scoped to the caller: a customer may only settle their own top-up.
+    const payment = await paymentsCollection().findOne({ _id: oid, user_id: user['_id'] });
+    if (!payment) throw new HttpError(404, 'Payment not found.');
+
+    const payload = CheckoutResult.parse(req.body);
+
+    if (payment['provider_order_id'] !== payload.razorpay_order_id) {
+      throw new HttpError(400, 'This order does not belong to that payment.');
+    }
+    if (
+      !gateway.verifyCheckoutSignature(
+        payload.razorpay_order_id,
+        payload.razorpay_payment_id,
+        payload.razorpay_signature,
+      )
+    ) {
+      throw new HttpError(400, 'Payment signature is not valid.');
+    }
+
+    res.json(await settle(oid, { providerPaymentId: payload.razorpay_payment_id }));
+  }),
+);
+
+/**
+ * The gateway webhook — the authoritative confirmation.
+ *
+ * Verified against the webhook secret over the **raw** body; a re-serialised
+ * payload hashes differently and every delivery would be rejected. This is what
+ * settles a payment when the customer closes the browser before the callback
+ * fires.
+ *
+ * `express.raw` is mounted on this route specifically, because the JSON body
+ * parser would have already consumed and re-encoded the bytes the signature is
+ * computed over.
+ */
+billingRouter.post(
+  '/webhook/razorpay',
+  express.raw({ type: '*/*', limit: '1mb' }),
+  asyncHandler(async (req: Request, res) => {
+    if (!getSettings().RAZORPAY_WEBHOOK_SECRET) {
+      throw new HttpError(
+        503,
+        'Payment webhook is not configured (RAZORPAY_WEBHOOK_SECRET unset).',
+      );
+    }
+
+    const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from('');
+    if (!gateway.verifyWebhookSignature(raw, req.get('X-Razorpay-Signature') ?? '')) {
+      throw new HttpError(401, 'Invalid webhook signature.');
+    }
+
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(raw.toString('utf8'));
+    } catch {
+      throw new HttpError(400, 'Malformed webhook body.');
+    }
+
+    const name = String(event['event'] ?? '');
+    if (name !== 'payment.captured' && name !== 'payment.authorized') {
+      // Acknowledge anything else so the gateway stops retrying — an
+      // unrecognised event is not a failure on our side.
+      res.json({ status: true, ignored: name });
+      return;
+    }
+
+    const payloadField = (event['payload'] ?? {}) as Record<string, unknown>;
+    const paymentField = (payloadField['payment'] ?? {}) as Record<string, unknown>;
+    const entity = (paymentField['entity'] ?? {}) as Record<string, unknown>;
+    const orderId = entity['order_id'];
+    if (!orderId) throw new HttpError(400, 'Webhook carried no order id.');
+
+    const payment = await paymentsCollection().findOne({ provider_order_id: orderId });
+    if (!payment) {
+      // 200, not 404: an order we do not recognise is not something the gateway
+      // can fix by retrying, and a 4xx would have it retry for days.
+      logger.warn('payment webhook for unknown order %s', String(orderId));
+      res.json({ status: true, ignored: 'unknown_order' });
+      return;
+    }
+
+    res.json(
+      await settle(payment['_id'] as ObjectId, {
+        providerPaymentId: (entity['id'] as string) ?? null,
+        method: (entity['method'] as string) ?? null,
       }),
     );
   }),

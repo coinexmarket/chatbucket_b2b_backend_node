@@ -30,6 +30,14 @@ export interface Service {
   unit: string;
   /** INR per `unitSize` units. */
   rate: Decimal;
+  /**
+   * The rate exactly as written in the card, for display.
+   *
+   * decimal.js normalises "4.0" to "4"; Python's Decimal keeps the trailing
+   * zero, and the pricing page shows that string verbatim. Storing the literal
+   * keeps the two services rendering the identical price.
+   */
+  rateText: string;
   /** How many units one `rate` covers. */
   unitSize: number;
   /**
@@ -54,16 +62,16 @@ const LIST: Service[] = [
   // Audio services bill fractional minutes exactly. To bill per whole second
   // instead — what telcos and speech APIs do — add `billingIncrement: SECOND`
   // to each of the four `minutes` services.
-  { key: 'stt_streaming', label: 'Speech-to-Text (streaming)', unit: 'minutes', rate: toDecimal('0.52'), unitSize: 1 },
-  { key: 'stt_offline', label: 'Speech-to-Text (offline/upload)', unit: 'minutes', rate: toDecimal('0.39'), unitSize: 1 },
-  { key: 'tts_streaming', label: 'Text-to-Speech (streaming)', unit: 'characters', rate: toDecimal('0.91'), unitSize: 1000 },
-  { key: 'tts_offline', label: 'Text-to-Speech (offline/upload)', unit: 'characters', rate: toDecimal('0.78'), unitSize: 1000 },
+  { key: 'stt_streaming', label: 'Speech-to-Text (streaming)', unit: 'minutes', rate: toDecimal('0.52'), rateText: '0.52', unitSize: 1 },
+  { key: 'stt_offline', label: 'Speech-to-Text (offline/upload)', unit: 'minutes', rate: toDecimal('0.39'), rateText: '0.39', unitSize: 1 },
+  { key: 'tts_streaming', label: 'Text-to-Speech (streaming)', unit: 'characters', rate: toDecimal('0.91'), rateText: '0.91', unitSize: 1000 },
+  { key: 'tts_offline', label: 'Text-to-Speech (offline/upload)', unit: 'characters', rate: toDecimal('0.78'), rateText: '0.78', unitSize: 1000 },
   // The two token services are the candidates for split pricing: set inputRate
   // and outputRate on one to switch it over. Both must be set.
-  { key: 'translation', label: 'Translation', unit: 'tokens', rate: toDecimal('7.5'), unitSize: 10000 },
-  { key: 'chat_agent', label: 'Chat Agent', unit: 'tokens', rate: toDecimal('4.38'), unitSize: 10000 },
-  { key: 'voice_agent_web', label: 'Voice Agent (web call)', unit: 'minutes', rate: toDecimal('4.0'), unitSize: 1 },
-  { key: 'voip_call', label: 'Voice Agent (VoIP call)', unit: 'minutes', rate: toDecimal('5.0'), unitSize: 1 },
+  { key: 'translation', label: 'Translation', unit: 'tokens', rate: toDecimal('7.5'), rateText: '7.5', unitSize: 10000 },
+  { key: 'chat_agent', label: 'Chat Agent', unit: 'tokens', rate: toDecimal('4.38'), rateText: '4.38', unitSize: 10000 },
+  { key: 'voice_agent_web', label: 'Voice Agent (web call)', unit: 'minutes', rate: toDecimal('4.0'), rateText: '4.0', unitSize: 1 },
+  { key: 'voip_call', label: 'Voice Agent (VoIP call)', unit: 'minutes', rate: toDecimal('5.0'), rateText: '5.0', unitSize: 1 },
 ];
 
 export const SERVICES: Record<string, Service> = Object.fromEntries(
@@ -242,16 +250,45 @@ export function calculateSplitCost(
   );
 }
 
-/** JSON-serialisable description of every service. */
+/** Per-model prices configured for one service, for the rate card. */
+export function modelsFor(serviceKey: string): Array<Record<string, unknown>> {
+  return MODEL_RATE_LIST.filter((m) => m.service === serviceKey).map((m) => ({
+    model: m.model,
+    rate: m.rate.toNumber(),
+    per: m.unitSize ?? SERVICES[serviceKey]?.unitSize ?? 1,
+  }));
+}
+
+/**
+ * A JSON-serialisable description of every service and its price.
+ *
+ * The key names and the human-readable `pricing` string are what the public
+ * pricing page renders, so this shape is fixed by the frontend rather than
+ * chosen here — it matches the Python service field for field.
+ */
 export function rateCard(): Array<Record<string, unknown>> {
   return LIST.map((s) => ({
     service: s.key,
     label: s.label,
     unit: s.unit,
     rate: s.rate.toNumber(),
-    unit_size: s.unitSize,
+    per: s.unitSize,
+    pricing:
+      s.unitSize !== 1
+        ? `₹${s.rateText} per ${s.unitSize} ${s.unit}`
+        : // "per minute", not "per minutes" — the unit is singular here.
+          `₹${s.rateText} per ${s.unit.slice(0, -1)}`,
+    // Set when input and output are priced separately; `rate` above is then the
+    // legacy flat rate and no longer what gets charged.
     input_rate: s.inputRate?.toNumber() ?? null,
     output_rate: s.outputRate?.toNumber() ?? null,
-    currency: 'INR',
+    // NOT `pricing` — that key already carries the human-readable price string
+    // the rate card has always returned, and reusing it silently replaced it.
+    pricing_mode: splitsInputOutput(s) ? 'split' : 'flat',
+    // Smallest billable amount; null means exact fractions are billed.
+    billing_increment: s.billingIncrement?.toNumber() ?? null,
+    // Models priced differently from the service. Empty means every model on
+    // this service bills at the service rate above.
+    models: modelsFor(s.key),
   }));
 }

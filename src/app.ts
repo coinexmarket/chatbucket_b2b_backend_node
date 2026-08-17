@@ -14,6 +14,9 @@ import { accountRouter } from './routes/account.js';
 import { apiKeysRouter } from './routes/apiKeys.js';
 import { authRouter } from './routes/auth.js';
 import { billingRouter } from './routes/billing.js';
+import { blogsRouter } from './routes/blogs.js';
+import { contestRouter } from './routes/contest.js';
+import { enginesRouter } from './routes/engines.js';
 import { limitsRouter } from './routes/limits.js';
 import { notificationsRouter } from './routes/notifications.js';
 import { demoRouter, pricingRouter, subscriptionsRouter } from './routes/misc.js';
@@ -35,7 +38,20 @@ export function createApp(): Express {
   app.set('trust proxy', true);
   app.disable('x-powered-by');
 
-  app.use(express.json({ limit: '1mb' }));
+  /**
+   * JSON everywhere **except** the payment webhook.
+   *
+   * That route verifies an HMAC over the exact bytes the gateway sent. Parsing
+   * and re-serialising the body produces a different digest, so every delivery
+   * would be rejected — and a rejected webhook means a customer who paid never
+   * gets their credits. The route mounts `express.raw` itself; this skip is what
+   * lets it see the original bytes.
+   */
+  const WEBHOOK_PATHS = new Set(['/billing/webhook/razorpay']);
+  app.use((req, res, next) => {
+    if (WEBHOOK_PATHS.has(req.path)) return next();
+    return express.json({ limit: '1mb' })(req, res, next);
+  });
 
   /**
    * CORS: exact-match origins, plus any loopback port in development.
@@ -83,6 +99,11 @@ export function createApp(): Express {
   app.use('/demo-requests', demoRouter);
   app.use('/subscriptions', subscriptionsRouter);
   app.use('/notifications', notificationsRouter);
+  app.use('/engines', enginesRouter);
+  app.use('/api', contestRouter);
+  // Mounted at the root: these paths are the contract the blog frontend already
+  // calls (/v1/blogs, /v2/blogs/...), not a prefix we get to choose.
+  app.use(blogsRouter);
 
   app.use((_req, res) => {
     res.status(404).json({ detail: 'Not found.' });

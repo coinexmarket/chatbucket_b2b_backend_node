@@ -88,17 +88,25 @@ export function getPlan(key: string | null | undefined): Plan {
   return plan;
 }
 
-/** JSON-serialisable description of every plan. */
+/**
+ * JSON-serialisable description of every plan.
+ *
+ * The key names are what the pricing page renders — `plan`, `price`, `credits`,
+ * `bonus_credits` — not the internal camelCase ones. Fixed by the frontend
+ * rather than chosen here; it matches the Python service field for field.
+ */
 export function planCatalogue(): Array<Record<string, unknown>> {
   return LIST.map((p) => ({
-    key: p.key,
+    plan: p.key,
     label: p.label,
     requests_per_minute: p.requestsPerMinute,
     concurrency: p.concurrency,
     support: p.support,
     best_for: p.bestFor,
-    price_inr: p.priceInr.toNumber(),
-    credits_granted: p.creditsGranted.toNumber(),
+    price: p.priceInr.toNumber(),
+    credits: p.creditsGranted.toNumber(),
+    // What the pack gives away above its cash price.
+    bonus_credits: p.creditsGranted.minus(p.priceInr).toNumber(),
     purchasable: p.priceInr.greaterThan(0),
   }));
 }

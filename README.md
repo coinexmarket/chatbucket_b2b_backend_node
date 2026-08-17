@@ -2,9 +2,9 @@
 
 A TypeScript/Express port of the FastAPI service in `../chatbucket_b2b_backend`.
 
-**Status: foundation complete, ~15% of endpoints ported.** This runs, is tested,
-and interoperates with the Python service — but it is not yet a replacement for
-it. See [What is left](#what-is-left).
+**Status: all 71 endpoints ported.** This runs, is tested, and interoperates
+with the Python service against the same database. It has not yet served
+production traffic — see [Cutover](#cutover) before it does.
 
 ---
 
@@ -148,31 +148,82 @@ into an account-enumeration oracle.
 
 ---
 
-## What is left
+## What is ported
 
-| Area | Endpoints | Estimate |
+All 71 endpoints, plus the pieces behind them:
+
+| Area | Endpoints |
+| --- | --- |
+| `auth` — register, login, sessions, password reset, email + phone verification | 11 |
+| `usage` — metering, history, overview, timeseries, CSV export | 7 |
+| `billing` — balance, ledger, payments, invoices, top-up, gateway settlement | 12 |
+| `api-keys`, `projects`, `profile`, `account`, `limits` | 22 |
+| `status`, `engines`, `pricing`, `demo-requests`, `subscriptions` | 11 |
+| `notifications` — operator-triggered broadcasts and runs | 6 |
+| `blogs`, `contest` | 10 |
+
+Plus: the 13 designed email templates and their renderer, the monthly report,
+the scheduler with its four lifecycle jobs, and the payment-gateway seam.
+
+### Not ported, on purpose
+
+Nothing. Where the Python service leaves something unimplemented — per-model
+rates, engine quotas, invoice tax — this does too, and for the same reason: an
+invented value that reads as authoritative is worse than a null that admits
+nobody has been told the answer.
+
+## Test suites
+
+| Command | Checks | What it protects |
 | --- | --- | --- |
-| `usage` + analytics + engines | 7 | 3 d |
-| `billing` + payments + invoices | 12 | 2.5 d |
-| `api_keys`, `projects`, `profile`, `account`, `limits` | 22 | 2 d |
-| `status`, `blogs`, `contest`, `demo`, `subscriptions`, `pricing` | 18 | 1.5 d |
-| Email: 13 HTML templates + the renderer + `email.py` (748 lines) | – | 3.5 d |
-| Notifications + scheduler + monthly reports | 6 | 2 d |
-| Remaining auth routes (refresh, logout, password reset, email verify) | 6 | 1.5 d |
-| Porting the rest of the 473-check suite | – | 5 d |
-| Docker, CI, deploy spec, parity testing | – | 3 d |
+| `npm run test:parity` | 19 | Crypto compatibility with Python, against fixtures Python generated |
+| `npm run test:schema` | 13 | The documents this service writes carry every field Python writes |
+| `npm run test:templates` | 50 | Every email renders; nothing falls back to plain text silently |
+| `npm run test:scheduler` | 33 | Send-once, job locking, month arithmetic, release-on-failure |
+| `npm test` | 169 | End-to-end over every router, against a real MongoDB |
 
-**Roughly 24 more developer-days.** The email module is not a thin wrapper — it
-does multipart/alternative with explicit quoted-printable encoding, worked out
-because 8-bit bodies were being rejected without 8BITMIME. Nodemailer handles MIME
-differently, so that needs re-deriving and re-testing against real SMTP rather
-than translating.
+`npm run test:all` runs all five (284 checks).
 
-The 13 email templates are plain HTML and move across unchanged.
+### Four real bugs these caught
+
+Each was invisible to a test that compared Node against Node:
+
+- `credits.ts` invented a `Decimal128` `balance` field; Python stores integer
+  `balance_units`. Accounts would have read as zero-balance.
+- `register` wrote `plan: "free"`; there is no such plan, and `getPlan` would
+  have thrown on every account created.
+- zod applied `.email()` before trimming, so `" a@b.com "` was a 422 here and a
+  201 in Python.
+- Eight of the thirteen email templates fell back to plain text, because the
+  context keys had been guessed rather than read.
 
 ## Cutover
 
 Do not switch DNS at a Node service that has merely passed its own tests. Run
-both, send the same requests to each, and diff the responses — the databases are
-shared, so this is safe and cheap. Only cut over once the suites and the real
-responses agree.
+both and diff the responses — the databases are shared, so this is safe and
+cheap:
+
+```bash
+npm run dev                      # Node on :8001
+# Python service on :8000
+diff <(curl -s :8001/pricing | python -m json.tool --sort-keys)      <(curl -s :8000/pricing | python -m json.tool --sort-keys)
+```
+
+That comparison has already earned its keep: it caught `/pricing` and
+`/limits/plans` returning the right numbers under the wrong key names, which no
+unit test would have noticed because both services were internally consistent.
+
+Two differences are expected and harmless: Python's JSON prints `4.0` where
+JavaScript prints `4` (the same number to any parser), and timestamps end
+`+00:00` rather than `Z` (both valid ISO-8601).
+
+### Before it takes traffic
+
+- `JWT_SECRET` must be **identical** in both services, or tokens issued by one
+  are rejected by the other and every outstanding OTP becomes unverifiable.
+- `NOTIFICATION_SCHEDULER_ENABLED` should be on in **exactly one** service.
+  Both would not double-send — the `job_runs` lock is shared — but only one
+  should be responsible for it.
+- The gateway webhook path must reach the Node service if it is settling
+  payments, and its signature is verified over raw bytes, so no proxy may
+  re-encode the body.

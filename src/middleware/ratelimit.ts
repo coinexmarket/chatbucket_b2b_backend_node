@@ -35,6 +35,7 @@ export const LIMITS: Record<string, Limit> = {
   forgot_ip: { max: 5, windowSeconds: 3600 },
   // Public, unauthenticated and it sends mail, so it is a spam target.
   demo_ip: { max: 10, windowSeconds: 3600 },
+  contest_ip: { max: 10, windowSeconds: 3600 },
   // Per address as well as per IP, so this cannot be used to mail-bomb someone.
   // Applied before the account lookup, so the limit is identical whether or not
   // the address exists — one that only bit real accounts would itself leak

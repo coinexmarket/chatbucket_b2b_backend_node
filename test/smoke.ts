@@ -689,6 +689,84 @@ async function main(): Promise<void> {
 
     r = await authed('GET', '/profile');
     check('and every token issued before closure is dead', r.status === 401, r.text);
+
+    // --- Blogs ----------------------------------------------------------------
+    r = await call('GET', '/v1/blogs');
+    check('the blog list is public', r.status === 200, r.text);
+    check(
+      'and mirrors the payload under the dataKey the frontend reads',
+      Array.isArray(r.json?.data) && Array.isArray(r.json?.blogs),
+      r.text,
+    );
+    check('with the envelope useFetch expects', r.json?.response_code === 200, r.text);
+
+    r = await call('GET', '/v1/categories');
+    check('categories mirror under their own dataKey', Array.isArray(r.json?.categories), r.text);
+
+    r = await call('GET', '/v1/blogs/no-such-slug');
+    check('an unknown slug -> 404', r.status === 404, r.text);
+    check('in the failure envelope, not a bare error', r.json?.status === false, r.text);
+
+    r = await call('GET', '/v1/related-blogs/anything');
+    check('related-blogs is not swallowed as a slug', r.status === 200, r.text);
+
+    // A pathological search must not pin a CPU on every document.
+    r = await call('GET', '/v1/c-blogs?text=' + encodeURIComponent('(a+)+$'));
+    check('a regex-shaped search is escaped, not executed', r.status === 200, r.text);
+
+    // --- Contest ---------------------------------------------------------------
+    r = await call('POST', '/api/register', {
+      fullName: 'Ada Lovelace',
+      email: 'ada@example.com',
+      mobileNumber: '+919876500003',
+      consent: true,
+    });
+    check('a contest registration is accepted', r.status === 200, r.text);
+    check('and returns the frontend shape', r.json?.success === true, r.text);
+    const reference = r.json?.data?.referenceNumber as string;
+    check('with a WX- reference number', /^WX-[A-Z0-9]{6}$/.test(reference ?? ''), reference);
+
+    r = await call('GET', '/api/verify');
+    check('verifying with no id -> 400', r.status === 400, r.text);
+
+    r = await call('GET', '/api/verify?id=CB-HACK-2026-' + reference.slice(0, 6));
+    check('a real badge id verifies', r.json?.valid === true, r.text);
+    check('and names the participant', r.json?.name === 'Ada Lovelace', r.text);
+
+    r = await call('GET', '/api/verify?id=CB-HACK-2026-ZZZZZZ');
+    check('an unknown badge answers valid:false with a 200', r.status === 200 && r.json?.valid === false, r.text);
+
+    // --- Engines ---------------------------------------------------------------
+    r = await call('GET', '/engines/usage');
+    check('engine burn with no OPS_SECRET configured -> 503', r.status === 503, r.text);
+
+    // --- Payment gateway signatures --------------------------------------------
+    const gateway = await import('../src/services/payments.js');
+    check(
+      'a checkout signature is refused when no key secret is set',
+      !gateway.verifyCheckoutSignature('order_1', 'pay_1', 'deadbeef'),
+    );
+    check(
+      'and a webhook signature likewise',
+      !gateway.verifyWebhookSignature(Buffer.from('{}'), 'deadbeef'),
+    );
+    check('no gateway configured is reported as such', !gateway.gatewayConfigured());
+
+    // Unauthenticated: settling a payment is scoped to its owner, so the route
+    // must refuse a caller with no session before it looks anything up.
+    r = await call('POST', '/billing/payments/000000000000000000000000/verify', {
+      razorpay_order_id: 'order_1',
+      razorpay_payment_id: 'pay_1',
+      razorpay_signature: 'nope',
+    });
+    check('settling a payment requires a session', r.status === 401, r.text);
+
+    const hook = await fetch(`http://127.0.0.1:${port}/billing/webhook/razorpay`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event: 'payment.captured' }),
+    });
+    check('the webhook fails closed with no secret configured', hook.status === 503, String(hook.status));
   } finally {
     server.close();
     await reset();
