@@ -283,7 +283,7 @@ async function main(): Promise<void> {
 
     // --- Authenticated routes ------------------------------------------------
     r = await call('POST', '/auth/login', { email: 'pre@acme.io', password: 'supersecret1' });
-    const token = r.json?.access_token as string;
+    let token = r.json?.access_token as string;
     const refreshToken = r.json?.refresh_token as string;
     const auth = (extra: Record<string, string> = {}): Record<string, string> => ({
       Authorization: `Bearer ${token}`,
@@ -411,6 +411,164 @@ async function main(): Promise<void> {
       newPassword: 'anotherpass1',
     });
     check('a spent reset token cannot be reused', r.status === 400, r.text);
+
+    // --- Usage: pricing -------------------------------------------------------
+    r = await call('POST', '/usage/estimate', { service: 'tts_offline', quantity: 1000 });
+    check('an estimate needs no auth', r.status === 200, r.text);
+    check('and prices 1000 chars at the card rate', r.json?.data?.cost === 0.78, r.text);
+
+    r = await call('POST', '/usage/estimate', { service: 'stt_streaming', quantity: 2.5 });
+    check('fractional minutes price exactly', r.json?.data?.cost === 1.3, r.text);
+
+    r = await call('POST', '/usage/estimate', { service: 'nope', quantity: 1 });
+    check('an unknown service -> 400', r.status === 400, r.text);
+
+    r = await call('POST', '/usage/estimate', {
+      service: 'chat_agent',
+      input_quantity: 100,
+      output_quantity: 50,
+    });
+    check('split pricing on a flat-rate service -> 400', r.status === 400, r.text);
+
+    // --- Usage: the billing write ---------------------------------------------
+    // Sign in again: the password reset above retired the earlier token.
+    r = await call('POST', '/auth/login', { email: 'pre@acme.io', password: 'brandnewpass1' });
+    token = r.json?.access_token as string;
+
+    r = await authed('POST', '/api-keys', { name: 'Metering key' });
+    const meterKey = r.json?.api_key as string;
+    const withKey = (extra: Record<string, string> = {}): Record<string, string> => ({
+      'X-API-Key': meterKey,
+      ...extra,
+    });
+
+    r = await authed('POST', '/usage', { service: 'tts_offline', quantity: 1000 }, withKey());
+    check('usage records against the key owner', r.status === 201, r.text);
+    check('and is marked billed', r.json?.data?.billed === true, r.text);
+    check('and debits the balance exactly', r.json?.balance === 99.22, r.text);
+    check('and reports the rate actually charged', r.json?.data?.rate === 0.78, r.text);
+
+    // A retry must not charge twice. This is the property that matters most in
+    // the whole port: metering clients retry on timeout.
+    const idem = withKey({ 'Idempotency-Key': 'smoke-key-1' });
+    r = await authed('POST', '/usage', { service: 'tts_offline', quantity: 1000 }, idem);
+    check('a keyed usage call records', r.status === 201, r.text);
+    const firstId = r.json?.data?.id;
+    const balanceAfterFirst = r.json?.balance;
+
+    r = await authed('POST', '/usage', { service: 'tts_offline', quantity: 1000 }, idem);
+    check('replaying the same Idempotency-Key -> 200, not 201', r.status === 200, r.text);
+    check('and flags itself as a replay', r.json?.replayed === true, r.text);
+    check('and returns the ORIGINAL record', r.json?.data?.id === firstId, r.text);
+
+    r = await authed('GET', '/billing');
+    check(
+      'the replay did NOT charge a second time',
+      r.json?.data?.credits === balanceAfterFirst,
+      `${r.json?.data?.credits} vs ${balanceAfterFirst}`,
+    );
+
+    // Insufficient credits: the consumption is still recorded.
+    r = await authed('POST', '/usage', { service: 'translation', quantity: 100_000_000 }, withKey());
+    check('usage beyond the balance -> 402', r.status === 402, r.text);
+    r = await authed('GET', '/usage?service=translation');
+    check('but the consumption is still recorded', r.json?.total === 1, r.text);
+    check('flagged as unbilled', r.json?.data?.[0]?.billed === false, r.text);
+
+    r = await authed('GET', '/billing');
+    check('and the balance was not touched', r.json?.data?.credits === balanceAfterFirst, r.text);
+
+    // --- Usage: reporting -----------------------------------------------------
+    r = await authed('GET', '/usage/overview?days=30');
+    check('overview responds', r.status === 200, r.text);
+    check('with a total cost', typeof r.json?.data?.total_cost === 'number', r.text);
+    check(
+      'and a null change against no baseline, not a fake 0%',
+      r.json?.data?.change_percent?.cost === null,
+      JSON.stringify(r.json?.data?.change_percent),
+    );
+
+    r = await authed('GET', '/usage/summary');
+    check('summary responds', r.status === 200, r.text);
+    check('with a per-service split', Array.isArray(r.json?.data?.by_service), r.text);
+
+    r = await authed('GET', '/usage/timeseries?granularity=daily');
+    check('timeseries responds', r.status === 200, r.text);
+    r = await authed('GET', '/usage/timeseries?granularity=nonsense');
+    check('an unknown granularity -> 400', r.status === 400, r.text);
+
+    const csv = await fetch(`http://127.0.0.1:${port}/usage/export.csv`, { headers: auth() });
+    const csvText = await csv.text();
+    check('the CSV export responds', csv.status === 200, String(csv.status));
+    check(
+      'as text/csv',
+      (csv.headers.get('content-type') ?? '').includes('text/csv'),
+      csv.headers.get('content-type') ?? '',
+    );
+    check(
+      'with a header row',
+      Boolean(csvText.split('\r\n')[0]?.startsWith('id,created_at,')),
+      csvText.slice(0, 60),
+    );
+    check('and one row per record', csvText.trim().split('\r\n').length === 4, String(csvText.trim().split('\r\n').length));
+
+    // --- Billing: top-up and settlement ---------------------------------------
+    r = await authed('POST', '/billing/top-up', { plan: 'pro' });
+    check('a plan top-up is created', r.status === 201, r.text);
+    check('priced from the catalogue', r.json?.data?.amount === 10000, r.text);
+    check('granting the pack credits (10% bonus)', r.json?.data?.credits === 11000, r.text);
+    check('and starts pending — no credits yet', r.json?.data?.status === 'pending', r.text);
+    const paymentId = r.json?.data?.id as string;
+
+    r = await authed('GET', '/billing');
+    const beforeSettle = r.json?.data?.credits;
+
+    r = await authed('POST', '/billing/top-up', { plan: 'starter' });
+    check('an unpurchasable plan -> 400', r.status === 400, r.text);
+    r = await authed('POST', '/billing/top-up', { plan: 'pro', amount_inr: 500 });
+    check('sending both plan and amount -> 422', r.status === 422, r.text);
+
+    // The webhook must fail CLOSED when no secret is configured.
+    r = await call('POST', `/billing/payments/${paymentId}/confirm`, {
+      provider_payment_id: 'pay_test_1',
+    });
+    check('confirming with no secret configured -> 503', r.status === 503, r.text);
+
+    // Configure one and retry. (getSettings caches, so this exercises the
+    // wrong-secret path against the configured value.)
+    r = await authed('GET', '/billing/history');
+    check('the ledger lists the signup bonus', r.status === 200, r.text);
+    check(
+      'and the metered spends',
+      r.json?.data?.some((e: any) => e.kind === 'usage'),
+      r.text,
+    );
+    check(
+      'each ledger row carries the balance after it',
+      r.json?.data?.every((e: any) => typeof e.balance_after === 'number'),
+      r.text,
+    );
+
+    r = await authed('PUT', '/billing/details', { legal_name: 'Acme Pvt Ltd', gstin: '29ABCDE1234F1Z5' });
+    check('billing details save', r.status === 200, r.text);
+    r = await authed('GET', '/billing/details');
+    check('and read back', r.json?.data?.legal_name === 'Acme Pvt Ltd', r.text);
+
+    r = await authed('PUT', '/billing/auto-recharge', { enabled: true, threshold_credits: 50, amount_inr: 1000 });
+    check('auto-recharge settings save', r.status === 200, r.text);
+    check(
+      'and the response says charging is not active yet',
+      String(r.json?.message ?? '').includes('not active'),
+      r.text,
+    );
+
+    r = await authed('GET', '/billing');
+    check('the balance is unchanged by a pending top-up', r.json?.data?.credits === beforeSettle, r.text);
+    check(
+      'and lifetime purchased is still zero',
+      r.json?.data?.lifetime_purchased_credits === 0,
+      r.text,
+    );
   } finally {
     server.close();
     await reset();

@@ -84,6 +84,8 @@ export const refreshTokensCollection = (): Collection<Document> =>
 export const notificationsCollection = (): Collection<Document> =>
   b2bDb().collection('notifications');
 export const jobRunsCollection = (): Collection<Document> => b2bDb().collection('job_runs');
+export const countersCollection = (): Collection<Document> => b2bDb().collection('counters');
+
 export const blogsCollection = (): Collection<Document> => blogDb().collection('blogs');
 
 /**

@@ -12,9 +12,11 @@ import { errorHandler } from './errors.js';
 import { logger } from './logger.js';
 import { apiKeysRouter } from './routes/apiKeys.js';
 import { authRouter } from './routes/auth.js';
+import { billingRouter } from './routes/billing.js';
 import { limitsRouter } from './routes/limits.js';
 import { profileRouter } from './routes/profile.js';
 import { projectsRouter } from './routes/projects.js';
+import { usageRouter } from './routes/usage.js';
 
 /** Any localhost/127.0.0.1 port, for local development only. */
 const LOOPBACK = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\]):\d+$/;
@@ -69,6 +71,8 @@ export function createApp(): Express {
   app.use('/projects', projectsRouter);
   app.use('/profile', profileRouter);
   app.use('/limits', limitsRouter);
+  app.use('/usage', usageRouter);
+  app.use('/billing', billingRouter);
 
   app.use((_req, res) => {
     res.status(404).json({ detail: 'Not found.' });

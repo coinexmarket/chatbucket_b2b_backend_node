@@ -88,6 +88,14 @@ const Schema = z.object({
   // on an N-worker deployment.
   ENFORCE_PLAN_RATE_LIMITS: boolish(true),
 
+  // --- Billing -------------------------------------------------------------
+  // Guards the payment-confirmation webhook. UNSET MEANS THE ROUTE REFUSES
+  // EVERYTHING (503) rather than accepting anything — an unset secret must not
+  // read as "anyone may grant credits".
+  BILLING_WEBHOOK_SECRET: str(),
+  INVOICE_NUMBER_PREFIX: str('INV-'),
+  INVOICE_NUMBER_PADDING: intish(4, 1, 12),
+
   // --- CORS ---------------------------------------------------------------
   // Exact origins only. `allow_credentials` is on, so a permissive value here
   // would let any site read authenticated responses.
