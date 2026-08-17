@@ -10,12 +10,15 @@ import { getSettings } from './config.js';
 import { indexesReady } from './database.js';
 import { errorHandler } from './errors.js';
 import { logger } from './logger.js';
+import { accountRouter } from './routes/account.js';
 import { apiKeysRouter } from './routes/apiKeys.js';
 import { authRouter } from './routes/auth.js';
 import { billingRouter } from './routes/billing.js';
 import { limitsRouter } from './routes/limits.js';
+import { demoRouter, pricingRouter, subscriptionsRouter } from './routes/misc.js';
 import { profileRouter } from './routes/profile.js';
 import { projectsRouter } from './routes/projects.js';
+import { statusRouter } from './routes/status.js';
 import { usageRouter } from './routes/usage.js';
 
 /** Any localhost/127.0.0.1 port, for local development only. */
@@ -73,6 +76,11 @@ export function createApp(): Express {
   app.use('/limits', limitsRouter);
   app.use('/usage', usageRouter);
   app.use('/billing', billingRouter);
+  app.use('/account', accountRouter);
+  app.use('/status', statusRouter);
+  app.use('/pricing', pricingRouter);
+  app.use('/demo-requests', demoRouter);
+  app.use('/subscriptions', subscriptionsRouter);
 
   app.use((_req, res) => {
     res.status(404).json({ detail: 'Not found.' });

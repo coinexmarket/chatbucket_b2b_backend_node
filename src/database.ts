@@ -85,6 +85,14 @@ export const notificationsCollection = (): Collection<Document> =>
   b2bDb().collection('notifications');
 export const jobRunsCollection = (): Collection<Document> => b2bDb().collection('job_runs');
 export const countersCollection = (): Collection<Document> => b2bDb().collection('counters');
+export const demoRequestsCollection = (): Collection<Document> =>
+  b2bDb().collection('demo_requests');
+export const subscriptionsCollection = (): Collection<Document> =>
+  b2bDb().collection('subscriptions');
+export const serviceStatusCollection = (): Collection<Document> =>
+  b2bDb().collection('service_status');
+export const serviceStatusDaysCollection = (): Collection<Document> =>
+  b2bDb().collection('service_status_days');
 
 export const blogsCollection = (): Collection<Document> => blogDb().collection('blogs');
 
@@ -171,6 +179,16 @@ export async function ensureIndexes(): Promise<void> {
   await paymentsCollection().createIndex(
     { provider_payment_id: 1 },
     { unique: true, partialFilterExpression: { provider_payment_id: { $exists: true } } },
+  );
+
+  await subscriptionsCollection().createIndex({ email: 1 }, { unique: true });
+  await demoRequestsCollection().createIndex({ created_at: -1 });
+  await demoRequestsCollection().createIndex({ email: 1 });
+
+  await serviceStatusCollection().createIndex({ service: 1 }, { unique: true });
+  await serviceStatusDaysCollection().createIndex(
+    { service: 1, day: 1 },
+    { unique: true },
   );
 
   await invoicesCollection().createIndex({ invoice_number: 1 }, { unique: true });

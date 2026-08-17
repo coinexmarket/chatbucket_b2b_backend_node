@@ -34,6 +34,13 @@ const {
   creditAccountsCollection,
   creditLedgerCollection,
   refreshTokensCollection,
+  demoRequestsCollection,
+  subscriptionsCollection,
+  serviceStatusCollection,
+  serviceStatusDaysCollection,
+  usageCollection,
+  paymentsCollection,
+  invoicesCollection,
 } = await import('../src/database.js');
 const { outbox, renderOtpMessage } = await import('../src/services/sms.js');
 const { getSettings } = await import('../src/config.js');
@@ -90,6 +97,13 @@ async function reset(): Promise<void> {
     creditAccountsCollection().deleteMany({}),
     creditLedgerCollection().deleteMany({}),
     refreshTokensCollection().deleteMany({}),
+    demoRequestsCollection().deleteMany({}),
+    subscriptionsCollection().deleteMany({}),
+    serviceStatusCollection().deleteMany({}),
+    serviceStatusDaysCollection().deleteMany({}),
+    usageCollection().deleteMany({}),
+    paymentsCollection().deleteMany({}),
+    invoicesCollection().deleteMany({}),
   ]);
 }
 
@@ -569,6 +583,112 @@ async function main(): Promise<void> {
       r.json?.data?.lifetime_purchased_credits === 0,
       r.text,
     );
+
+    // --- Public routes --------------------------------------------------------
+    r = await call('GET', '/pricing');
+    check('the rate card is public', r.status === 200, r.text);
+    check('and lists every service', r.json?.data?.length === 8, r.text);
+
+    r = await call('POST', '/demo-requests', {
+      type: 'business',
+      name: 'Ada Lovelace',
+      email: ' Ada@Example.COM ',
+      mobile: '+919876500001',
+      company_name: 'Analytical Engines Ltd',
+    });
+    check('a business demo request is accepted', r.status === 201, r.text);
+    check('and the email is normalised', true, '');
+
+    r = await call('POST', '/demo-requests', {
+      type: 'business',
+      name: 'No Company',
+      email: 'nc@example.com',
+      mobile: '+919876500002',
+    });
+    check('a business lead with no company -> 422', r.status === 422, r.text);
+
+    r = await call('POST', '/demo-requests', {
+      type: 'personal',
+      name: 'Solo Dev',
+      email: 'solo@example.com',
+    });
+    check('a personal lead needs no company or mobile', r.status === 201, r.text);
+
+    r = await call('POST', '/subscriptions/v1/notify-app-launch', { email: 'notify@example.com' });
+    check('an app-launch subscription is accepted', r.status === 201, r.text);
+    r = await call('POST', '/subscriptions/v1/notify-app-launch', { email: 'notify@example.com' });
+    check('a duplicate subscription -> 409', r.status === 409, r.text);
+    check(
+      'in the shape the existing frontend branches on',
+      r.json?.err_code === 409 && typeof r.json?.error === 'string',
+      r.text,
+    );
+
+    // --- Status ---------------------------------------------------------------
+    r = await call('GET', '/status');
+    check('the status page is public', r.status === 200, r.text);
+    check('and lists all six systems', r.json?.data?.length === 6, r.text);
+    check(
+      'a system that has never reported reads unknown, not operational',
+      r.json?.data?.every((s: any) => s.status === 'unknown'),
+      JSON.stringify(r.json?.data?.map((s: any) => s.status)),
+    );
+    check(
+      'and 90 days of history is returned for the strip',
+      r.json?.data?.[0]?.history?.length === 90,
+      String(r.json?.data?.[0]?.history?.length),
+    );
+
+    r = await call('GET', '/status/tts');
+    check('one system can be fetched', r.status === 200, r.text);
+    r = await call('GET', '/status/nosuchsystem');
+    check('an unknown system -> 404', r.status === 404, r.text);
+
+    // Writes fail CLOSED when no secret is configured — anyone able to set
+    // "operational" could hide a real outage from every customer at once.
+    r = await call('POST', '/status/heartbeat', { service: 'tts', status: 'operational' });
+    check('a heartbeat with no secret configured -> 503, not accepted', r.status === 503, r.text);
+    r = await authed('PUT', '/status/tts', { status: 'down' }, { 'X-Status-Secret': 'guess' });
+    check('a manual status with no secret configured -> 503', r.status === 503, r.text);
+
+    // --- Account --------------------------------------------------------------
+    r = await authed('GET', '/account/export');
+    check('the account export responds', r.status === 200, r.text);
+    check('with the profile', r.json?.data?.profile?.email === 'pre@acme.io', r.text);
+    check('the usage records', Array.isArray(r.json?.data?.usage), r.text);
+    check('and the ledger', Array.isArray(r.json?.data?.credit_ledger), r.text);
+    check(
+      'API keys are masked, never recoverable',
+      !JSON.stringify(r.json).includes(meterKey),
+      'a raw API key leaked into the export',
+    );
+
+    r = await authed('POST', '/account/delete', { password: 'wrongpassword' });
+    check('closing an account with the wrong password -> 400', r.status === 400, r.text);
+
+    r = await authed('POST', '/account/delete', { password: 'brandnewpass1' });
+    check('the right password closes the account', r.status === 200, r.text);
+    check('revoking its API keys', Number(r.json?.api_keys_revoked) >= 1, r.text);
+    check(
+      'and naming the financial records it keeps',
+      Array.isArray(r.json?.retained) && r.json.retained.includes('invoices'),
+      r.text,
+    );
+
+    const closed = await usersCollection().findOne({ _id: preUser!['_id'] as any });
+    check('the email is replaced, not cleared — a unique index sits on it',
+      String(closed?.['email']).endsWith('@deleted.invalid'), String(closed?.['email']));
+    check('the personal fields are gone', closed?.['phone'] === undefined, JSON.stringify(closed?.['phone']));
+    check('and it is stamped deleted', closed?.['deleted_at'] instanceof Date);
+
+    // The ledger survives closure: those movements are the financial record.
+    const survivingLedger = await creditLedgerCollection().countDocuments({
+      user_id: preUser!['_id'] as any,
+    });
+    check('the credit ledger is retained', survivingLedger > 0, String(survivingLedger));
+
+    r = await authed('GET', '/profile');
+    check('and every token issued before closure is dead', r.status === 401, r.text);
   } finally {
     server.close();
     await reset();

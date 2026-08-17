@@ -52,11 +52,19 @@ const phone = z.string().transform((value, ctx) => {
   }
 });
 
-/** Lowercased and trimmed, so one address cannot become two accounts. */
-const email = z
+/**
+ * Lowercased and trimmed, so one address cannot become two accounts.
+ *
+ * **Trimmed before validating, not after.** zod applies `.email()` to the raw
+ * string, so `" ada@x.com "` would be rejected — while pydantic's `EmailStr`
+ * strips first and accepts it. Validating first would mean a customer who typed
+ * a trailing space got a 422 here and a 201 from the Python service, which is
+ * precisely the kind of divergence that makes a split-traffic cutover unsafe.
+ */
+export const email = z
   .string()
-  .email('Enter a valid email address.')
-  .transform((v) => v.trim().toLowerCase());
+  .transform((v) => v.trim().toLowerCase())
+  .pipe(z.string().email('Enter a valid email address.'));
 
 /**
  * Accept `snake_case` alongside the canonical `camelCase` key.

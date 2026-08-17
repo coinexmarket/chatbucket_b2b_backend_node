@@ -96,6 +96,16 @@ const Schema = z.object({
   INVOICE_NUMBER_PREFIX: str('INV-'),
   INVOICE_NUMBER_PADDING: intish(4, 1, 12),
 
+  // --- Machine-facing secrets ----------------------------------------------
+  // Each fails CLOSED when unset (503), never open. Anyone able to set a system
+  // to "operational" could hide a real outage from every customer at once.
+  STATUS_WEBHOOK_SECRET: str(),
+  OPS_SECRET: str(),
+  // How long a heartbeat or probe stays trusted. Past this the service reads
+  // `unknown` rather than `operational` — a status page claiming all is well
+  // because nothing reported in is the classic failure of these pages.
+  STATUS_STALE_AFTER_SECONDS: intish(300, 30),
+
   // --- CORS ---------------------------------------------------------------
   // Exact origins only. `allow_credentials` is on, so a permissive value here
   // would let any site read authenticated responses.
