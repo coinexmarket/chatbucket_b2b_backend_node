@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -77,7 +78,22 @@ async def main():
     from app.security import create_access_token_for_user
 
     await database.connect()
-    user = await database.users_collection().find_one({'email': 'someone@example.com'})
+
+    # The account to authenticate as, given rather than hardcoded: this file is
+    # committed, and a real customer's address does not belong in a repository.
+    #
+    #     PARITY_ACCOUNT=someone@example.com python scripts/parity-live.py
+    #
+    # With none supplied it uses the oldest account, which on any real database
+    # is the operator's own rather than a customer's.
+    wanted = os.environ.get('PARITY_ACCOUNT')
+    query = {'email': wanted} if wanted else {}
+    user = await database.users_collection().find_one(query, sort=[('created_at', 1)])
+    if user is None:
+        print(f'  no account found{f" for {wanted}" if wanted else ""}; nothing to compare as')
+        return
+    print(f'  authenticating as {user.get("email")}')
+    print()
     token = create_access_token_for_user(user)
 
     # (method, path, needs auth, extra headers)
