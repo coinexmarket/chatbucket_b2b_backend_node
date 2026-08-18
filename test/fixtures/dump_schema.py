@@ -3,7 +3,7 @@
 Run from the Python repo so `app` is importable:
 
     cd ../chatbucket_b2b_backend
-    python ../chatbucket_b2b_node/test/fixtures/dump_schema.py
+    python ../chatbucket_b2b_backend_node/test/fixtures/dump_schema.py
 
 It writes `python-schema.json` next to itself. `test/schema-parity.ts` asserts
 the Node service writes every field listed there.
