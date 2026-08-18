@@ -182,5 +182,49 @@ check('a 503 reads down', (await prober.probe(`http://127.0.0.1:${port}/503`)) =
 server.close();
 check('an unreachable host reads down', (await prober.probe('http://127.0.0.1:1/health')) === status.DOWN);
 
+// --- The user serialization deny-list ----------------------------------------
+//
+// publicUser matches the Python contract by stripping named fields rather than
+// allowing named ones, so the frontend keeps getting `_id` and the rest. The
+// risk that trades away is a new secret field being exposed by default — bought
+// back here, by asserting that a user document carrying every secret we know of
+// leaks none of them.
+
+const { publicUser } = await import('../src/serialization.js');
+
+const SECRETS = [
+  'password_hash',
+  'reset_token_hash',
+  'reset_token_expires',
+  'verification_token_hash',
+  'verification_token_expires',
+  'verification_code_hash',
+  'verification_code_expires',
+  'phone_code_hash',
+  'phone_code_expires',
+  '_api_key_id',
+  '_api_key_project_id',
+];
+
+const loaded = publicUser({
+  _id: 'abc',
+  email: 'a@example.com',
+  name: 'Ada',
+  how_did_you_hear: 'Google Search',
+  ...Object.fromEntries(SECRETS.map((k) => [k, 'SHOULD-NOT-LEAK'])),
+});
+
+for (const field of SECRETS) {
+  check(`publicUser strips ${field}`, !(field in loaded), JSON.stringify(Object.keys(loaded)));
+}
+check(
+  'and no secret VALUE survives anywhere in the output',
+  !JSON.stringify(loaded).includes('SHOULD-NOT-LEAK'),
+  JSON.stringify(loaded),
+);
+// The contract half: the fields the frontend reads are still there.
+check('while keeping _id, which the frontend reads', loaded['_id'] === 'abc');
+check('and the non-secret profile fields', loaded['how_did_you_hear'] === 'Google Search');
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 if (failed > 0) process.exit(1);

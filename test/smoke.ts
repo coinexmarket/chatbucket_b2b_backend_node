@@ -486,8 +486,13 @@ async function main(): Promise<void> {
     r = await authed('POST', '/usage', { service: 'translation', quantity: 100_000_000 }, withKey());
     check('usage beyond the balance -> 402', r.status === 402, r.text);
     r = await authed('GET', '/usage?service=translation');
-    check('but the consumption is still recorded', r.json?.total === 1, r.text);
+    check('but the consumption is still recorded', r.json?.count === 1, r.text);
     check('flagged as unbilled', r.json?.data?.[0]?.billed === false, r.text);
+    check(
+      'and the engine that served it is never disclosed — that is our margin',
+      !('engine' in (r.json?.data?.[0] ?? {})) && !('provider' in (r.json?.data?.[0] ?? {})),
+      JSON.stringify(Object.keys(r.json?.data?.[0] ?? {})),
+    );
 
     r = await authed('GET', '/billing');
     check('and the balance was not touched', r.json?.data?.credits === balanceAfterFirst, r.text);
@@ -495,16 +500,30 @@ async function main(): Promise<void> {
     // --- Usage: reporting -----------------------------------------------------
     r = await authed('GET', '/usage/overview?days=30');
     check('overview responds', r.status === 200, r.text);
-    check('with a total cost', typeof r.json?.data?.total_cost === 'number', r.text);
+    check('with the current period cost', typeof r.json?.current?.cost === 'number', r.text);
+    check('and the preceding one to compare against', typeof r.json?.previous?.cost === 'number', r.text);
     check(
-      'and a null change against no baseline, not a fake 0%',
-      r.json?.data?.change_percent?.cost === null,
-      JSON.stringify(r.json?.data?.change_percent),
+      'a null change against no baseline, not a fake 0%',
+      r.json?.change_percent?.cost === null,
+      JSON.stringify(r.json?.change_percent),
     );
 
     r = await authed('GET', '/usage/summary');
     check('summary responds', r.status === 200, r.text);
-    check('with a per-service split', Array.isArray(r.json?.data?.by_service), r.text);
+    check('with a per-service split', Array.isArray(r.json?.by_service), r.text);
+    check('and per-key attribution', Array.isArray(r.json?.by_api_key), r.text);
+    // Unpaid consumption is reported separately: folding it into one total
+    // would overstate what the customer was actually charged.
+    check(
+      'billed + unbilled reconcile to the grand total',
+      Math.abs(r.json.billed_total + r.json.unbilled_total - r.json.grand_total) < 0.0001,
+      `${r.json?.billed_total} + ${r.json?.unbilled_total} vs ${r.json?.grand_total}`,
+    );
+    check(
+      'the 402 consumption shows as unbilled',
+      r.json?.unbilled_total > 0,
+      String(r.json?.unbilled_total),
+    );
 
     // The property a "does it respond" check cannot see: EVERY day in the range
     // is returned, including the ones with no usage. Dropping empty buckets

@@ -21,7 +21,12 @@ import { z } from 'zod';
 
 import * as analytics from '../analytics.js';
 import { getSettings } from '../config.js';
-import { indexesReady, usageCollection } from '../database.js';
+import {
+  apiKeysCollection,
+  indexesReady,
+  projectsCollection,
+  usageCollection,
+} from '../database.js';
 import { HttpError, asyncHandler } from '../errors.js';
 import {
   requireMetering,
@@ -40,7 +45,7 @@ import {
   resolveRate,
   splitRates,
 } from '../pricing.js';
-import { toIso } from '../serialization.js';
+import { jsonSafe, toIso } from '../serialization.js';
 import * as credits from '../services/credits.js';
 
 export const usageRouter = Router();
@@ -424,79 +429,63 @@ usageRouter.get(
   asyncHandler(async (req: Request, res) => {
     const user = (req as AuthedRequest).user;
     const limit = Math.min(500, Math.max(1, Number(req.query['limit'] ?? 50)));
-    const offset = Math.max(0, Number(req.query['offset'] ?? 0));
-    const filter = scope(user, req.query);
 
-    const total = await usageCollection().countDocuments(filter);
     const docs = await usageCollection()
-      .find(filter)
+      .find(scope(user, req.query), {
+        // Which engine served the call, and what it consumed, is our
+        // commercial information — it is our margin. Projected away here
+        // rather than filtered afterwards so it never reaches the process
+        // boundary at all.
+        projection: { engine: 0, engine_quantity: 0, provider: 0, provider_key: 0 },
+      })
       .sort({ created_at: -1 })
-      .skip(offset)
       .limit(limit)
       .toArray();
 
-    res.json({
-      status: true,
-      count: docs.length,
-      total,
-      limit,
-      offset,
-      data: docs.map(recorded),
-    });
+    res.json({ status: true, count: docs.length, data: docs.map(jsonSafe) });
   }),
 );
 
-/** Totals over a window: what it cost, how many calls, split by service. */
+interface PeriodTotals {
+  cost: ReturnType<typeof toDecimal>;
+  quantity: number;
+  requests: number;
+}
+
 async function periodTotals(
   user: Record<string, unknown>,
   begin: Date,
   finish: Date,
-): Promise<{ cost: ReturnType<typeof toDecimal>; calls: number; byService: Array<Record<string, unknown>> }> {
+): Promise<PeriodTotals> {
   const rows = await usageCollection()
     .aggregate([
-      { $match: { user_id: user['_id'], created_at: { $gte: begin, $lte: finish } } },
+      { $match: { user_id: user['_id'], created_at: { $gte: begin, $lt: finish } } },
       {
         $group: {
-          _id: '$service',
+          _id: null,
           // `$sum` over Decimal128 is exact — the reason costs are stored that
           // way rather than as doubles.
           cost: { $sum: '$cost' },
-          calls: { $sum: 1 },
           quantity: { $sum: '$quantity' },
+          requests: { $sum: 1 },
         },
       },
-      { $sort: { cost: -1 } },
     ])
     .toArray();
 
+  const row = rows[0] ?? {};
   return {
-    cost: sumOf(rows.map((r) => (r['cost'] ?? 0) as AmountLike)),
-    calls: rows.reduce((n, r) => n + Number(r['calls'] ?? 0), 0),
-    byService: rows.map((r) => ({
-      service: r['_id'],
-      label: SERVICE_LABEL(r['_id'] as string),
-      cost: toJson((r['cost'] ?? 0) as AmountLike),
-      calls: Number(r['calls'] ?? 0),
-      quantity: Number(r['quantity'] ?? 0),
-    })),
+    cost: toDecimal((row['cost'] ?? 0) as AmountLike),
+    quantity: round4(Number(row['quantity'] ?? 0)),
+    requests: Number(row['requests'] ?? 0),
   };
 }
 
-function SERVICE_LABEL(key: string): string {
-  try {
-    return getService(key).label;
-  } catch {
-    // A service removed from the rate card still has history; label it by key
-    // rather than dropping the row.
-    return key;
-  }
-}
-
 /**
- * Percentage change, or null when there is no baseline.
+ * Percent change, or null when there is no baseline to compare against.
  *
- * Null rather than 0 or 100: "no previous usage" is not "no change", and a
- * dashboard showing +0% for a customer's first month would be wrong.
+ * Returning 0 or 100 for "no usage last period" would both be lies; the
+ * dashboard should render a dash instead of inventing a trend.
  */
 function percentChange(current: AmountLike, previous: AmountLike): number | null {
   const prev = toDecimal(previous);
@@ -504,6 +493,12 @@ function percentChange(current: AmountLike, previous: AmountLike): number | null
   return toDecimal(current).minus(prev).dividedBy(prev).times(100).toDecimalPlaces(2).toNumber();
 }
 
+/**
+ * Headline figures for the dashboard, against the preceding period.
+ *
+ * The comparison window is the same length immediately before, so "30 days" is
+ * measured against the 30 days before that rather than a calendar month.
+ */
 usageRouter.get(
   '/overview',
   requireUser,
@@ -512,65 +507,202 @@ usageRouter.get(
     const days = Math.min(365, Math.max(1, Number(req.query['days'] ?? 30)));
 
     const now = new Date();
-    const begin = new Date(now.getTime() - days * 86_400_000);
-    const priorBegin = new Date(begin.getTime() - days * 86_400_000);
+    const spanMs = days * 86_400_000;
+    const currentStart = new Date(now.getTime() - spanMs);
+    const previousStart = new Date(now.getTime() - spanMs * 2);
 
-    const current = await periodTotals(user, begin, now);
-    const previous = await periodTotals(user, priorBegin, begin);
+    const current = await periodTotals(user, currentStart, now);
+    const previous = await periodTotals(user, previousStart, currentStart);
     const balance = await credits.balanceOf(user['_id'] as ObjectId);
 
     res.json({
       status: true,
-      data: {
+      currency: getSettings().CURRENCY,
+      plan: getPlan(user['plan'] as string | undefined).key,
+      credits: balance.toNumber(),
+      period: {
         days,
-        from: begin.toISOString(),
+        from: currentStart.toISOString(),
         to: now.toISOString(),
-        total_cost: toJson(current.cost),
-        total_calls: current.calls,
-        credits_remaining: balance.toNumber(),
-        by_service: current.byService,
-        change_percent: {
-          cost: percentChange(current.cost, previous.cost),
-          calls: previous.calls === 0 ? null : percentChange(current.calls, previous.calls),
-        },
+      },
+      current: {
+        cost: toJson(current.cost),
+        requests: current.requests,
+        quantity: current.quantity,
+      },
+      previous: {
+        cost: toJson(previous.cost),
+        requests: previous.requests,
+        quantity: previous.quantity,
+      },
+      change_percent: {
+        cost: percentChange(current.cost, previous.cost),
+        requests: percentChange(current.requests, previous.requests),
       },
     });
   }),
 );
 
+/** Aggregate the caller's spend by service, model, key and project. */
 usageRouter.get(
   '/summary',
   requireUser,
   asyncHandler(async (req: Request, res) => {
     const user = (req as AuthedRequest).user;
-    const now = new Date();
-    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const userId = user['_id'];
 
-    const month = await periodTotals(user, monthStart, now);
-    const balance = await credits.balanceOf(user['_id'] as ObjectId);
-    const lifetime = await usageCollection().countDocuments({ user_id: user['_id'] });
+    const rows = await usageCollection()
+      .aggregate([
+        { $match: { user_id: userId } },
+        {
+          $group: {
+            _id: '$service',
+            label: { $first: '$label' },
+            unit: { $first: '$unit' },
+            total_quantity: { $sum: '$quantity' },
+            total_cost: { $sum: '$cost' },
+            events: { $sum: 1 },
+          },
+        },
+      ])
+      .toArray();
+
+    // Consumption that ran out of credits is recorded but never charged.
+    // Folding it into one total would overstate what the customer actually
+    // paid, so it is reported as its own figure.
+    const unbilledDocs = await usageCollection()
+      .find({ user_id: userId, billed: false }, { projection: { cost: 1 } })
+      .toArray();
+    const unbilled = sumOf(unbilledDocs.map((d) => (d['cost'] ?? 0) as AmountLike));
+
+    // Per-model breakdown. Only records that reported a model take part; the
+    // rest are reported as `unattributed_cost` so the rows still reconcile
+    // against `grand_total` instead of quietly not adding up.
+    const modelRows = await usageCollection()
+      .aggregate([
+        { $match: { user_id: userId, model_key: { $ne: null } } },
+        {
+          $group: {
+            _id: '$model_key',
+            model: { $first: '$model' },
+            total_quantity: { $sum: '$quantity' },
+            total_cost: { $sum: '$cost' },
+            events: { $sum: 1 },
+          },
+        },
+      ])
+      .toArray();
+
+    // Ordered here rather than with a `$sort` stage: there is one row per
+    // service (eight at most) and they are all in memory already, so this costs
+    // nothing and keeps Decimal128 ordering out of the aggregation layer.
+    const rank = (list: Array<Record<string, unknown>>) =>
+      list
+        .map((row) => [row, toDecimal((row['total_cost'] ?? 0) as AmountLike)] as const)
+        .sort((a, b) => b[1].comparedTo(a[1]));
+
+    const ranked = rank(rows);
+    const byService = ranked.map(([row, cost]) => ({
+      service: row['_id'],
+      label: row['label'] ?? null,
+      unit: row['unit'] ?? null,
+      total_quantity: round4(Number(row['total_quantity'] ?? 0)),
+      total_cost: toJson(cost),
+      events: Number(row['events'] ?? 0),
+    }));
+
+    // Per-API-key breakdown, labelled with each key's name so the dashboard's
+    // key filter can show "Production" rather than a raw ObjectId.
+    const keyRows = await usageCollection()
+      .aggregate([
+        { $match: { user_id: userId, api_key_id: { $ne: null } } },
+        { $group: { _id: '$api_key_id', total_cost: { $sum: '$cost' }, events: { $sum: 1 } } },
+      ])
+      .toArray();
+
+    const keyDocs = await apiKeysCollection().find({ user_id: userId }).toArray();
+    const keyNames = new Map(
+      keyDocs.map((d) => [
+        String(d['_id']),
+        {
+          name: d['name'] ?? null,
+          masked_key: `${d['key_prefix'] ?? 'cb_live'}_****${d['key_last4'] ?? ''}`,
+          revoked: Boolean(d['revoked']),
+        },
+      ]),
+    );
+
+    const byApiKey = rank(keyRows).map(([row, cost]) => ({
+      api_key_id: row['_id'],
+      // A key deleted from the collection would leave usage with no label;
+      // name it rather than rendering a blank row.
+      ...(keyNames.get(String(row['_id'])) ?? {
+        name: '(deleted key)',
+        masked_key: null,
+        revoked: true,
+      }),
+      total_cost: toJson(cost),
+      events: Number(row['events'] ?? 0),
+    }));
+
+    // Per-project breakdown, labelled from the project list.
+    const projectRows = await usageCollection()
+      .aggregate([
+        { $match: { user_id: userId, project_id: { $ne: null } } },
+        { $group: { _id: '$project_id', total_cost: { $sum: '$cost' }, events: { $sum: 1 } } },
+      ])
+      .toArray();
+    const projectDocs = await projectsCollection().find({ user_id: userId }).toArray();
+    const projectNames = new Map(projectDocs.map((d) => [String(d['_id']), d['name']]));
+
+    const byProject = rank(projectRows).map(([row, cost]) => ({
+      project_id: row['_id'],
+      // Usage outlives the project it was recorded under, by design — deleting
+      // a project must not rewrite what a period cost.
+      name: projectNames.get(String(row['_id'])) ?? '(deleted project)',
+      total_cost: toJson(cost),
+      events: Number(row['events'] ?? 0),
+    }));
+
+    const rankedModels = rank(modelRows);
+    // Summed from the Decimals, not the rendered numbers above — adding those
+    // back up is exactly what would reintroduce the drift.
+    const attributed = sumOf(rankedModels.map(([, cost]) => cost));
+    const grandTotal = sumOf(ranked.map(([, cost]) => cost));
+
+    const byModel = rankedModels.map(([row, cost]) => ({
+      model: row['model'] ?? null,
+      model_key: row['_id'],
+      total_quantity: round4(Number(row['total_quantity'] ?? 0)),
+      total_cost: toJson(cost),
+      events: Number(row['events'] ?? 0),
+      // What this model accounts for, which is what the usage table's
+      // percentage column shows.
+      share_percent: grandTotal.isZero()
+        ? 0
+        : cost.dividedBy(grandTotal).times(100).toDecimalPlaces(2).toNumber(),
+    }));
 
     res.json({
       status: true,
-      data: {
-        month_start: monthStart.toISOString(),
-        month_cost: toJson(month.cost),
-        month_calls: month.calls,
-        lifetime_calls: lifetime,
-        credits_remaining: balance.toNumber(),
-        by_service: month.byService,
-      },
+      currency: getSettings().CURRENCY,
+      // Everything consumed...
+      grand_total: toJson(grandTotal),
+      // ...of which this much was never paid for (credits exhausted)...
+      unbilled_total: toJson(unbilled),
+      // ...leaving what the customer was actually charged.
+      billed_total: toJson(grandTotal.minus(unbilled)),
+      by_service: byService,
+      by_model: byModel,
+      by_api_key: byApiKey,
+      by_project: byProject,
+      // Consumption from callers that did not report a model. Non-zero here
+      // means a service is metering without sending `model`.
+      unattributed_cost: toJson(grandTotal.minus(attributed)),
     });
   }),
 );
 
-/**
- * Spend, requests and quantity bucketed over time, for the usage charts.
- *
- * Buckets with no usage are returned as **zeroes rather than omitted**:
- * dropping them would make a quiet day vanish from the x-axis instead of
- * showing as a flat line, so the chart would misrepresent the month.
- */
 usageRouter.get(
   '/timeseries',
   requireUser,

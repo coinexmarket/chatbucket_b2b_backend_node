@@ -129,7 +129,10 @@ export function createApp(): Express {
   app.use(blogsRouter);
 
   app.use((_req, res) => {
-    res.status(404).json({ detail: 'Not found.' });
+    // "Not Found", exactly as FastAPI renders an unmatched route. The wording
+    // is part of the contract: a client that string-matches on it would break
+    // against a tidier message.
+    res.status(404).json({ detail: 'Not Found' });
   });
 
   // Last: Express picks a handler by arity, so this must be registered after

@@ -87,6 +87,9 @@ accountRouter.get(
             .fromUnits(Number(e['balance_after_units'] ?? 0))
             .toNumber(),
           description: e['description'] ?? null,
+          // What the movement points at — the usage record or payment that
+          // caused it. Null for a signup bonus, which points at nothing.
+          ref: e['ref'] != null ? String(e['ref']) : null,
           created_at: toIso(e['created_at']),
         })),
         payments: (await rows(paymentsCollection())).map(jsonSafe),
