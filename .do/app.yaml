@@ -208,6 +208,37 @@ services:
     type: SECRET
     value: ${RAZORPAY_WEBHOOK_SECRET}
 
+  # --- Proxy and rate limiting -----------------------------------------------
+  # TRUE here specifically because App Platform terminates TLS and forwards, so
+  # the real client address only exists in X-Forwarded-For. Without this every
+  # request appears to come from the platform's proxy and ONE customer's traffic
+  # exhausts everybody's per-IP limit.
+  #
+  # The code default is false, for the opposite deployment: with nothing in
+  # front, a forged header would let any caller invent an address per request and
+  # walk past the same limits. Neither value is safe in both places, which is why
+  # it is stated here rather than left to a default.
+  - key: TRUST_PROXY_HEADERS
+    scope: RUN_TIME
+    value: 'true'
+  # Stated rather than defaulted: the OTP send cap is what stands between this
+  # service and somebody else's phone bill.
+  - key: RATE_LIMIT_ENABLED
+    scope: RUN_TIME
+    value: 'true'
+
+  # --- Currency ---------------------------------------------------------------
+  - key: CURRENCY
+    scope: RUN_TIME
+    value: INR
+
+  # --- Status probing ----------------------------------------------------------
+  # EMPTY: this deployment learns service status from heartbeats, so no prober
+  # runs. Set `key=url` pairs to have the platform poll health endpoints itself.
+  - key: STATUS_PROBE_URLS
+    scope: RUN_TIME
+    value: ''
+
   # --- CORS -----------------------------------------------------------------
   # Exact origins only. Credentials are allowed, so a permissive value here
   # would let any site read authenticated responses. The dev loopback rule is
