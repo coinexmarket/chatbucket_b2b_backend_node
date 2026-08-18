@@ -38,13 +38,26 @@ let transport: Transporter | null = null;
 function getTransport(): Transporter {
   if (transport) return transport;
   const s = getSettings();
+  // `secure` means TLS from the first byte, which is port 465's model.
+  // STARTTLS (587) connects in the clear and upgrades, so the two are mutually
+  // exclusive — asking for both leaves the server to pick and the other setting
+  // silently ignored. SMTP_USE_SSL wins where it is set explicitly; otherwise
+  // the port decides, which is what almost every deployment means.
+  const implicitTls = s.SMTP_USE_SSL || s.SMTP_PORT === 465;
   transport = nodemailer.createTransport({
     host: s.SMTP_HOST,
     port: s.SMTP_PORT,
-    // STARTTLS on 587, implicit TLS on 465. `secure` means "TLS from the first
-    // byte", which is only true for 465 — setting it for 587 fails to connect.
-    secure: s.SMTP_PORT === 465,
-    requireTLS: s.SMTP_USE_TLS && s.SMTP_PORT !== 465,
+    secure: implicitTls,
+    requireTLS: s.SMTP_USE_TLS && !implicitTls,
+    // A hung connection to a mail server must not hold a request open; the
+    // send is fire-and-forget, but the socket is not free.
+    connectionTimeout: s.SMTP_TIMEOUT_SECONDS * 1000,
+    greetingTimeout: s.SMTP_TIMEOUT_SECONDS * 1000,
+    socketTimeout: s.SMTP_TIMEOUT_SECONDS * 1000,
+    // Logs the SMTP conversation, for when a server rejects a message for
+    // reasons it will not put in the bounce.
+    logger: s.SMTP_DEBUG,
+    debug: s.SMTP_DEBUG,
     auth: s.SMTP_USERNAME ? { user: s.SMTP_USERNAME, pass: s.SMTP_PASSWORD } : undefined,
   });
   return transport;
@@ -152,7 +165,7 @@ export function sendPasswordReset(
   name?: string | null,
 ): Promise<boolean> {
   const s = getSettings();
-  const link = `${appUrl('/reset-password')}?token=${token}`;
+  const link = `${appUrl(s.PASSWORD_RESET_PATH)}?token=${token}`;
   const minutes = s.RESET_TOKEN_EXPIRE_MINUTES;
   const greeting = firstName(name);
 
@@ -187,7 +200,7 @@ export function sendVerificationEmail(
   name?: string | null,
 ): Promise<boolean> {
   const s = getSettings();
-  const link = `${appUrl('/verify-email')}?token=${token}`;
+  const link = `${appUrl(s.EMAIL_VERIFY_PATH)}?token=${token}`;
   const minutes = s.EMAIL_OTP_EXPIRE_MINUTES;
   const hours = s.VERIFICATION_TOKEN_EXPIRE_HOURS;
 

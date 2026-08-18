@@ -232,12 +232,14 @@ const CURRENCY_NAMES: Record<string, string> = {
 };
 
 export function currencySymbol(): string {
-  const code = 'INR';
+  const code = getSettings().CURRENCY.toUpperCase();
+  // The code, with a space, for anything unlisted: better a correct
+  // "USD 40.00" than a confidently wrong glyph.
   return CURRENCY_SYMBOLS[code] ?? `${code} `;
 }
 
 export function currencyName(): string {
-  const code = 'INR';
+  const code = getSettings().CURRENCY.toUpperCase();
   return CURRENCY_NAMES[code] ?? code;
 }
 

@@ -61,6 +61,18 @@ const Schema = z.object({
   // existing site already writes.
   MONGODB_CONTEST_DB: str('ChatBucketHackathon'),
 
+  // --- Proxy and rate limiting ----------------------------------------------
+  // OFF by default, and that default matters. `X-Forwarded-For` is trivially
+  // forged, so believing it unconditionally lets any caller invent an address
+  // per request and walk straight past every per-IP limit — login attempts, OTP
+  // sends, demo-form spam. Turn it on only when a proxy you control rewrites the
+  // header.
+  TRUST_PROXY_HEADERS: boolish(false),
+  // An escape hatch for local work and load tests. Never false in production:
+  // the OTP send limit is what stands between the service and somebody else's
+  // phone bill.
+  RATE_LIMIT_ENABLED: boolish(true),
+
   // --- Tokens -------------------------------------------------------------
   JWT_SECRET: str('dev-secret-change-me'),
   JWT_ALGORITHM: str('HS256'),
@@ -131,6 +143,12 @@ const Schema = z.object({
   // authoritative while being fiction.
   ENGINE_FREE_QUOTAS: str(),
 
+  // --- Status probing --------------------------------------------------------
+  // `key=url` pairs, comma-separated. Empty means this deployment reports status
+  // by heartbeat instead and no prober runs at all.
+  STATUS_PROBE_URLS: str(),
+  STATUS_PROBE_INTERVAL_SECONDS: intish(60, 10),
+
   // --- Machine-facing secrets ----------------------------------------------
   // Each fails CLOSED when unset (503), never open. Anyone able to set a system
   // to "operational" could hide a real outage from every customer at once.
@@ -152,7 +170,22 @@ const Schema = z.object({
   SMTP_PORT: intish(587, 1, 65535),
   SMTP_USERNAME: str(),
   SMTP_PASSWORD: str(),
+  // STARTTLS on the standard submission port (587): connect in the clear, then
+  // upgrade. Distinct from USE_SSL below, which is TLS from the first byte.
+  //
+  // The Python service calls this SMTP_STARTTLS, and its deploy spec sets that
+  // name. Both are accepted (see `build`), so an operator copying environment
+  // variables between the two services does not silently fall back to the
+  // default here.
   SMTP_USE_TLS: boolish(true),
+  SMTP_STARTTLS: boolish(true),
+  // Implicit TLS, for port 465. Setting both is a configuration error — the
+  // server picks SSL and ignores STARTTLS.
+  SMTP_USE_SSL: boolish(false),
+  SMTP_TIMEOUT_SECONDS: intish(20, 1),
+  // Logs the SMTP conversation. Useful when a server rejects a message for
+  // reasons it will not put in the bounce; noisy enough to leave off otherwise.
+  SMTP_DEBUG: boolish(false),
   EMAIL_FROM: str('support@chatbucket.business'),
   EMAIL_FROM_NAME: str('ChatBucket'),
   SUPPORT_EMAIL: str('support@chatbucket.business'),
@@ -185,6 +218,13 @@ const Schema = z.object({
   // account somebody creates hours later.
   PHONE_VERIFICATION_GRACE_MINUTES: intish(30, 1, 1440),
 
+  // --- Currency -------------------------------------------------------------
+  // Drives the symbol and the name shown in every email and on the rate card.
+  // Configurable rather than hardcoded because the templates already know how
+  // to render USD, EUR and GBP, and a hardcoded rupee would be wrong the day
+  // that matters.
+  CURRENCY: str('INR'),
+
   // --- Links used in emails -----------------------------------------------
   FRONTEND_URL: str('http://localhost:3000'),
   // Paths appended to FRONTEND_URL / MARKETING_URL to build the links every
@@ -195,6 +235,12 @@ const Schema = z.object({
   TRACK_QUERY_PATH: str('/support/tickets'),
   PRIVACY_POLICY_PATH: str('/privacy-policy'),
   TERMS_PATH: str('/terms-of-service'),
+  // Where the links in the verification and reset emails land. Configurable
+  // because the frontend owns its own routing — a hardcoded path breaks
+  // silently the day it renames a page, and the breakage is a dead link in an
+  // email somebody already received.
+  EMAIL_VERIFY_PATH: str('/verify-email'),
+  PASSWORD_RESET_PATH: str('/reset-password'),
   MARKETING_URL: str('https://chatbucket.business'),
   DISPLAY_TIMEZONE: str('Asia/Kolkata'),
   TERMS_VERSION: str('2025-01-01'),
@@ -210,6 +256,8 @@ export interface Settings extends RawSettings {
   readonly corsOriginList: string[];
   /** Engine allowances by key, parsed from ENGINE_FREE_QUOTAS. */
   readonly engineQuotaMap: Record<string, number>;
+  /** Health URLs to poll, by system key, parsed from STATUS_PROBE_URLS. */
+  readonly statusProbeMap: Record<string, string>;
   /** `SMS_BACKEND` with `auto` resolved against whether a gateway is configured. */
   readonly resolvedSmsBackend: string;
   /** `EMAIL_BACKEND` with `auto` resolved against whether SMTP is configured. */
@@ -242,6 +290,11 @@ function build(): Settings {
     throw new Error('JWT_SECRET must be set to a real secret in production.');
   }
 
+  // An explicit SMTP_STARTTLS wins, since it is the name the sibling service
+  // and its deploy spec use; otherwise SMTP_USE_TLS applies.
+  const useTls =
+    process.env['SMTP_STARTTLS'] !== undefined ? raw.SMTP_STARTTLS : raw.SMTP_USE_TLS;
+
   const resolvedSmsBackend =
     raw.SMS_BACKEND === 'auto' ? (raw.SMS_API_URL ? 'http' : 'console') : raw.SMS_BACKEND;
   const resolvedEmailBackend =
@@ -249,10 +302,20 @@ function build(): Settings {
 
   return {
     ...raw,
+    SMTP_USE_TLS: useTls,
     isDev: !isProduction,
     isProduction,
     smsCountryCodeList: splitList(raw.SMS_COUNTRY_CODES),
     corsOriginList: splitList(raw.CORS_ORIGINS),
+    statusProbeMap: Object.fromEntries(
+      splitList(raw.STATUS_PROBE_URLS)
+        .map((pair) => {
+          // Split on the FIRST '=' only: the value is a URL and contains more.
+          const at = pair.indexOf('=');
+          return at === -1 ? null : [pair.slice(0, at).trim(), pair.slice(at + 1).trim()];
+        })
+        .filter((entry): entry is [string, string] => entry !== null && Boolean(entry[1])),
+    ),
     engineQuotaMap: Object.fromEntries(
       splitList(raw.ENGINE_FREE_QUOTAS)
         .map((pair) => pair.split('='))

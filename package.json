@@ -1,7 +1,7 @@
 {
   "name": "chatbucket-b2b-backend",
   "version": "1.0.0",
-  "description": "ChatBucket B2B backend — Node.js port of the FastAPI service",
+  "description": "ChatBucket B2B backend \u2014 Node.js port of the FastAPI service",
   "private": true,
   "type": "module",
   "engines": {
@@ -15,10 +15,13 @@
     "test": "tsx test/smoke.ts",
     "test:parity": "tsx test/parity.ts",
     "test:schema": "tsx test/schema-parity.ts",
-    "test:all": "npm run test:parity && npm run test:schema && npm run test:analytics && npm run test:templates && npm run test:scheduler && npm test",
+    "test:all": "npm run test:parity && npm run test:schema && npm run test:analytics && npm run test:hardening && npm run test:templates && npm run test:scheduler && npm test",
     "test:templates": "tsx test/templates.ts",
     "test:scheduler": "tsx test/scheduler.ts",
-    "test:analytics": "tsx test/analytics.ts"
+    "test:analytics": "tsx test/analytics.ts",
+    "emails": "node scripts/send-test-emails.mjs",
+    "set-status": "node scripts/set-status.mjs",
+    "test:hardening": "tsx test/hardening.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -12,6 +12,7 @@
  */
 import type { NextFunction, Request, Response } from 'express';
 
+import { getSettings } from '../config.js';
 import { rateLimitsCollection } from '../database.js';
 import { HttpError } from '../errors.js';
 
@@ -76,6 +77,12 @@ export async function enforceLimit(
   key: string,
   limit: Limit,
 ): Promise<LimitResult> {
+  // Reports the full allowance as remaining when limiting is off, so the
+  // `X-RateLimit-*` headers stay truthful rather than claiming a ceiling that
+  // is not being applied.
+  if (!getSettings().RATE_LIMIT_ENABLED) {
+    return { remaining: limit.max, retryAfter: 0, limit: limit.max };
+  }
   const now = new Date();
   const bucket = `${name}:${key}`;
 
@@ -120,6 +127,9 @@ export async function enforceLimit(
 export async function enforce(name: string, key: string): Promise<void> {
   const limit = LIMITS[name];
   if (!limit) throw new Error(`Unknown rate limit: ${name}`);
+  // An escape hatch for local work and load tests. The name is still resolved
+  // above, so a typo in a limit name is caught even when limiting is off.
+  if (!getSettings().RATE_LIMIT_ENABLED) return;
 
   const now = new Date();
   const bucket = `${name}:${key}`;
@@ -149,11 +159,13 @@ export async function enforce(name: string, key: string): Promise<void> {
 }
 
 /**
- * The caller's IP.
+ * The caller's address.
  *
- * `req.ip` honours `trust proxy`, which must be set for the app to see the real
- * client address behind a load balancer. Without it every request appears to come
- * from the proxy and one customer's traffic would exhaust everybody's limit.
+ * `req.ip` honours Express's `trust proxy`, which `app.ts` sets from
+ * `TRUST_PROXY_HEADERS` — off unless a proxy you control rewrites the header.
+ * With it off, `req.ip` is the socket address and a forged `X-Forwarded-For` is
+ * ignored, which is what keeps per-IP limits meaningful on a directly exposed
+ * deployment.
  */
 export function clientIp(req: Request): string {
   return req.ip ?? req.socket.remoteAddress ?? 'unknown';

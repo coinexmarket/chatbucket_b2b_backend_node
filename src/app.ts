@@ -32,10 +32,18 @@ export function createApp(): Express {
   const s = getSettings();
   const app = express();
 
-  // Required for `req.ip` to be the real client behind a load balancer.
-  // Without it every request appears to come from the proxy, and one customer's
-  // traffic would exhaust everybody's rate limit.
-  app.set('trust proxy', true);
+  /**
+   * Whether to believe `X-Forwarded-For`.
+   *
+   * Behind a load balancer this must be on, or every request appears to come
+   * from the proxy and one customer's traffic exhausts everybody's rate limit.
+   *
+   * With nothing in front it must be OFF, and that is the default: the header
+   * is trivially forged, so trusting it lets any caller invent an address per
+   * request and walk past every per-IP limit — including the OTP send cap,
+   * which is the one that costs money.
+   */
+  app.set('trust proxy', s.TRUST_PROXY_HEADERS);
   app.disable('x-powered-by');
 
   /**

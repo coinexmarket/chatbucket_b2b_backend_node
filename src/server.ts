@@ -16,6 +16,7 @@ import { getSettings } from './config.js';
 import { connect, disconnect, ensureIndexes } from './database.js';
 import { logger } from './logger.js';
 import { schedulerLoop, stopScheduler } from './services/notifications.js';
+import { proberLoop, stopProber } from './services/prober.js';
 import { warmPasswordHasher } from './security.js';
 
 /** How long to wait between attempts to reach a database that was down. */
@@ -81,6 +82,11 @@ async function main(): Promise<void> {
     logger.info('notification scheduler is off (NOTIFICATION_SCHEDULER_ENABLED)');
   }
 
+  // Polls the configured health URLs and records what they say. Silent when
+  // STATUS_PROBE_URLS is unset, which is the deployment that reports by
+  // heartbeat instead.
+  void proberLoop();
+
   const server = createApp().listen(s.PORT, () => {
     // Not "127.0.0.1": listen() with no host binds every interface, which is
     // what a container needs. Printing a loopback URL here reads as a bind
@@ -97,6 +103,7 @@ async function main(): Promise<void> {
   const shutdown = (signal: string) => {
     logger.info('%s received, shutting down', signal);
     stopScheduler();
+    stopProber();
     server.close(() => {
       void disconnect().finally(() => process.exit(0));
     });
