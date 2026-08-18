@@ -75,6 +75,23 @@ export function useDatabases(b2b: Db, blog: Db = b2b): void {
   state.blog = blog;
 }
 
+/**
+ * Is the database actually reachable right now?
+ *
+ * Used by `/health`, which routes traffic on the answer, so it asks the server
+ * rather than trusting that `connect()` once succeeded — a client object stays
+ * alive across an outage and would report a connection that no longer works.
+ */
+export async function ping(): Promise<boolean> {
+  try {
+    if (!state.b2b) return false;
+    await state.b2b.command({ ping: 1 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** True when the indexes the app depends on are known to exist. */
 export function indexesReady(): boolean {
   return state.indexesReady;

@@ -1,0 +1,22 @@
+# Keep the build context small and, more importantly, keep secrets and local
+# state out of the image entirely.
+#
+# `.env` is the one that matters: it holds the live SMTP password, the SMS API
+# key and JWT_SECRET. A COPY that pulled it in would bake production
+# credentials into every layer of a published image.
+.env
+.env.*
+!.env.example
+
+node_modules
+dist
+.git
+.github
+*.log
+coverage
+
+# Tests are not shipped. They are run in CI against the source, and the build
+# stage excludes them from `dist` anyway (see tsconfig.build.json).
+test
+
+README.md

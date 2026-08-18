@@ -1,0 +1,217 @@
+# App Platform spec for the Node port of chatbucket-b2b-backend.
+#
+# Secrets are redacted: this spec is committed, and the live values are held
+# encrypted by App Platform.
+#
+# DEPLOYED ALONGSIDE THE PYTHON SERVICE, NOT INSTEAD OF IT.
+# ---------------------------------------------------------
+# Its own name and its own hostname, so both can run against the same database
+# and be compared request by request before anything is cut over. Nothing here
+# touches api.b2b.chatbucket.business; pointing that at this service is a
+# separate, deliberate change, made once the two agree.
+#
+# Two settings below are the ones that will bite if they are wrong:
+#
+#   JWT_SECRET must be IDENTICAL to the Python service's. Tokens issued by one
+#   have to be accepted by the other while traffic is split, and verification
+#   codes are HMAC'd under it — a different value silently invalidates every
+#   outstanding OTP and signs everybody out mid-session.
+#
+#   NOTIFICATION_SCHEDULER_ENABLED must be true in AT MOST ONE service. Both
+#   would not double-send — the (job, period) lock is shared through Mongo — but
+#   one service should own the lifecycle mail, and while the Python service owns
+#   it this stays false.
+name: chatbucket-b2b-backend-node
+region: blr
+
+domains:
+- domain: api-node.b2b.chatbucket.business
+  type: PRIMARY
+
+ingress:
+  rules:
+  - component:
+      name: api
+    match:
+      path:
+        prefix: /
+
+services:
+- name: api
+  http_port: 8001
+
+  image:
+    registry: chatbucket
+    registry_type: DOCR
+    repository: b2b-backend-node
+    tag: latest
+    deploy_on_push:
+      enabled: true
+
+  instance_count: 1
+  instance_size_slug: apps-s-1vcpu-1gb
+
+  health_check:
+    http_path: /health
+    # The service now starts even when Mongo is briefly unreachable and reports
+    # 503 until it recovers, so this probe genuinely reflects readiness rather
+    # than just "the process exists".
+    initial_delay_seconds: 30
+    period_seconds: 30
+    timeout_seconds: 5
+    success_threshold: 1
+    failure_threshold: 3
+
+  envs:
+  - key: ENVIRONMENT
+    scope: RUN_TIME
+    value: production
+
+  # --- The two shared with the Python service -------------------------------
+  - key: MONGODB_URI
+    scope: RUN_TIME
+    type: SECRET
+    value: ${MONGODB_URI}
+  # MUST match the Python service exactly — see the header.
+  - key: JWT_SECRET
+    scope: RUN_TIME
+    type: SECRET
+    value: ${JWT_SECRET}
+
+  # --- Machine-facing secrets; each fails CLOSED when unset -----------------
+  - key: BILLING_WEBHOOK_SECRET
+    scope: RUN_TIME
+    type: SECRET
+    value: ${BILLING_WEBHOOK_SECRET}
+  - key: STATUS_WEBHOOK_SECRET
+    scope: RUN_TIME
+    type: SECRET
+    value: ${STATUS_WEBHOOK_SECRET}
+  - key: OPS_SECRET
+    scope: RUN_TIME
+    type: SECRET
+    value: ${OPS_SECRET}
+
+  # --- Mail -----------------------------------------------------------------
+  - key: EMAIL_BACKEND
+    scope: RUN_TIME
+    value: smtp
+  - key: SMTP_HOST
+    scope: RUN_TIME
+    value: smtp.gmail.com
+  - key: SMTP_PORT
+    scope: RUN_TIME
+    value: '587'
+  - key: SMTP_USE_TLS
+    scope: RUN_TIME
+    value: 'true'
+  - key: SMTP_USERNAME
+    scope: RUN_TIME
+    value: Support@chatbucket.business
+  - key: SMTP_PASSWORD
+    scope: RUN_TIME
+    type: SECRET
+    value: ${SMTP_PASSWORD}
+  - key: EMAIL_FROM
+    scope: RUN_TIME
+    value: Support@chatbucket.business
+  - key: EMAIL_FROM_NAME
+    scope: RUN_TIME
+    value: ChatBucket
+  # Shown in every designed email's help block, and the Reply-To on the ones a
+  # customer might answer.
+  - key: SUPPORT_EMAIL
+    scope: RUN_TIME
+    value: Support@chatbucket.business
+  - key: SALES_EMAIL
+    scope: RUN_TIME
+    value: Support@chatbucket.business
+
+  # --- SMS ------------------------------------------------------------------
+  - key: SMS_BACKEND
+    scope: RUN_TIME
+    value: http
+  - key: SMS_API_URL
+    scope: RUN_TIME
+    type: SECRET
+    value: ${SMS_API_URL}
+  - key: SMS_USERNAME
+    scope: RUN_TIME
+    type: SECRET
+    value: ${SMS_USERNAME}
+  - key: SMS_API_KEY
+    scope: RUN_TIME
+    type: SECRET
+    value: ${SMS_API_KEY}
+  - key: SMS_SENDER_ID
+    scope: RUN_TIME
+    type: SECRET
+    value: ${SMS_SENDER_ID}
+  - key: SMS_TEMPLATE_ID
+    scope: RUN_TIME
+    type: SECRET
+    value: ${SMS_TEMPLATE_ID}
+  # EMPTY on purpose. The DLT-registered template has no trailing variable, and
+  # a word that is not in the registration makes the operator drop the message
+  # while the gateway still answers 200 and reports "Delivered". Setting this to
+  # anything non-empty stops OTP delivery with no error anywhere.
+  - key: SMS_TEMPLATE_SUFFIX
+    scope: RUN_TIME
+    value: ''
+
+  # --- Links shown in emails ------------------------------------------------
+  - key: FRONTEND_URL
+    scope: RUN_TIME
+    value: https://chatbucket.business
+  - key: MARKETING_URL
+    scope: RUN_TIME
+    value: https://chatbucket.business
+  # Dates and times in emails render in this zone; storage stays UTC.
+  - key: DISPLAY_TIMEZONE
+    scope: RUN_TIME
+    value: Asia/Kolkata
+
+  # --- Product policy -------------------------------------------------------
+  # An unverified account cannot create an API key, so it cannot spend the
+  # signup credits. Without this, ₹100 free per account is farmable with
+  # throwaway addresses. Satisfied by EITHER channel, so Indian accounts that
+  # verified by SMS are not blocked.
+  - key: REQUIRE_EMAIL_VERIFICATION
+    scope: RUN_TIME
+    value: 'true'
+  # Stated here rather than left to the code default, because it is a
+  # per-signup cost and should be visible in the spec.
+  - key: SIGNUP_BONUS_CREDITS
+    scope: RUN_TIME
+    value: '100'
+  # KEEP false while the Python service owns the lifecycle mail — see the
+  # header. Also gated on chatbucket.business publishing SPF and DMARC:
+  # enabling it before that mails the whole customer base from an
+  # unauthenticated domain, straight into spam.
+  - key: NOTIFICATION_SCHEDULER_ENABLED
+    scope: RUN_TIME
+    value: 'false'
+
+  # --- Payment gateway ------------------------------------------------------
+  - key: RAZORPAY_KEY_ID
+    scope: RUN_TIME
+    value: ${RAZORPAY_KEY_ID}
+  - key: RAZORPAY_KEY_SECRET
+    scope: RUN_TIME
+    type: SECRET
+    value: ${RAZORPAY_KEY_SECRET}
+  # A DIFFERENT secret from the key secret. Signing a webhook against the wrong
+  # one rejects every delivery, and a rejected webhook means a customer who paid
+  # never receives their credits.
+  - key: RAZORPAY_WEBHOOK_SECRET
+    scope: RUN_TIME
+    type: SECRET
+    value: ${RAZORPAY_WEBHOOK_SECRET}
+
+  # --- CORS -----------------------------------------------------------------
+  # Exact origins only. Credentials are allowed, so a permissive value here
+  # would let any site read authenticated responses. The dev loopback rule is
+  # switched off automatically because ENVIRONMENT is production.
+  - key: CORS_ORIGINS
+    scope: RUN_TIME
+    value: https://chatbucket.business,https://www.chatbucket.business,https://chatbucket.chat,https://www.chatbucket.chat

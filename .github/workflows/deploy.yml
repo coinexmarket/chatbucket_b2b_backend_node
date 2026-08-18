@@ -1,0 +1,236 @@
+name: Build, test and deploy
+
+# One workflow covering everything a change needs: proving it is correct,
+# proving it is not vulnerable, and shipping it.
+#
+# Pull requests stop after the checks. Only main and a manual dispatch publish,
+# and only once everything above them has passed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # So an image can be rebuilt and shipped without an empty commit.
+  workflow_dispatch:
+
+concurrency:
+  # Two pushes in quick succession must not race to publish `latest`; the older
+  # one is abandoned rather than allowed to overwrite the newer image.
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege by default. A workflow that can only read the repository
+# cannot be turned into one that rewrites it, and every job that needs more asks
+# for exactly what it needs.
+permissions:
+  contents: read
+
+# Every action is pinned to an exact patch. A floating major tag is a moving
+# target: the same commit can build differently tomorrow because someone else
+# released, and nothing in this repository would record it.
+env:
+  REGISTRY: registry.digitalocean.com/chatbucket
+  IMAGE: b2b-backend-node
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # A hung suite should not hold a runner for six hours, which is the default.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22 is what the image runs. 20 is the oldest LTS the code targets and
+        # 24 the newest — a dependency that stops working on either shows up
+        # here rather than in a failed deploy.
+        node-version: ["20", "22", "24"]
+
+    services:
+      # A REAL MongoDB, not a mock. The suites deliberately test behaviour that
+      # lives in the database — unique indexes, TTL expiry, atomic `$inc` under
+      # `$gte`, `$sum` over Decimal128 — and a mock that reimplemented those
+      # would be testing the mock.
+      mongo:
+        image: mongo:7
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1}).ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      MONGODB_URI: mongodb://127.0.0.1:27017
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v6.0.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      # `ci`, not `install`: it installs exactly the lockfile and fails if the
+      # two have drifted, so CI cannot pass against a dependency set that the
+      # repository does not actually pin.
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Six suites, run separately so a failure names which property broke
+      # rather than just "tests failed".
+      - name: Cross-language crypto parity
+        run: npm run test:parity
+      - name: Document schema parity
+        run: npm run test:schema
+      - name: Usage chart bucketing
+        run: npm run test:analytics
+      - name: Email templates
+        run: npm run test:templates
+      - name: Scheduler and lifecycle jobs
+        run: npm run test:scheduler
+      - name: End-to-end
+        run: npm test
+
+      # The build is part of the test, not an afterthought: `tsc` emits only
+      # what it compiles, so a missing asset step produces an image that starts,
+      # serves every endpoint, and silently sends every email as plain text.
+      # `copy-assets` fails the build if the templates did not make it.
+      - name: Build
+        run: npm run build
+
+  codeql:
+    # Static analysis of the source. Complements the suites: they prove the
+    # behaviour we thought to check, this looks for the classes of bug nobody
+    # wrote a test for.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write   # to file findings in the Security tab
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: github/codeql-action/init@v4.37.6
+        with:
+          languages: javascript-typescript
+          queries: security-and-quality
+      - uses: github/codeql-action/analyze@v4.37.6
+
+  dependency-review:
+    # Pull requests only: refuses a change that introduces a dependency with a
+    # known vulnerability, at the point where removing it is still cheap.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/dependency-review-action@v5.0.0
+        with:
+          fail-on-severity: high
+
+  image-smoke:
+    # Pull requests only. On main the same image is built by `publish` and
+    # proven by production's own health check.
+    if: github.event_name == 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4.2.0
+      - name: Build image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          load: true
+          tags: chatbucket-b2b-node:pr
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Scanned before anything is trusted to run. A CVE in the base image is
+      # the most likely way this service acquires one, and it arrives without
+      # any change to our own code. The runtime stage deletes npm for exactly
+      # this reason — see the Dockerfile.
+      - name: Scan the image for known vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: chatbucket-b2b-node:pr
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true   # nothing to do about a CVE with no patch yet
+          exit-code: "1"
+
+      - name: Container starts, answers /health, and carries its templates
+        run: ./.github/scripts/smoke-image.sh chatbucket-b2b-node:pr
+
+  publish:
+    # The image is only built once the suites and static analysis pass. App
+    # Platform's own deploy-on-push has no such gate — it ships whatever
+    # arrives, and a red main would go straight to production.
+    if: github.event_name != 'pull_request'
+    needs: [test, codeql]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4.2.0
+
+      - uses: digitalocean/action-doctl@v2.5.2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Log in to the registry
+        run: doctl registry login --expiry-seconds 1200
+
+      # Built once, loaded locally, and scanned before it is pushed anywhere.
+      # Scanning after publication would mean the vulnerable image is already
+      # the one production is being told to deploy.
+      - name: Build
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          load: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan the image for known vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      # Booted before it is published, not after. A commit reaching main another
+      # way would otherwise put an image in the registry that nobody had ever
+      # started — and the first thing to notice would be production failing its
+      # health check, with a bad `latest` already sitting there.
+      - name: Container starts, answers /health, and carries its templates
+        run: ./.github/scripts/smoke-image.sh "$REGISTRY/$IMAGE:${{ github.sha }}"
+
+      # The commit tag goes first and is immutable: it is what a rollback names.
+      # `latest` is what App Platform follows, so it moves last — never before
+      # the thing it will deploy is safely stored under a fixed name.
+      - name: Push the commit tag
+        run: docker push "$REGISTRY/$IMAGE:${{ github.sha }}"
+
+      - name: Push latest, which triggers the deploy
+        run: docker push "$REGISTRY/$IMAGE:latest"
+
+      # App Platform reacts to the push asynchronously, so wait for the running
+      # service to actually answer rather than reporting success at upload.
+      - name: Wait for the deploy to serve the new image
+        run: |
+          for i in $(seq 1 30); do
+            body=$(curl -sf "$HEALTH_URL" || true)
+            case "$body" in
+              *'"database":"up"'*) echo "$body"; exit 0;;
+            esac
+            sleep 20
+          done
+          echo "health never reported the database up after the deploy" >&2
+          exit 1
+        env:
+          HEALTH_URL: https://api-node.b2b.chatbucket.business/health

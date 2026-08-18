@@ -7,7 +7,7 @@ import cors from 'cors';
 import express, { type Express } from 'express';
 
 import { getSettings } from './config.js';
-import { indexesReady } from './database.js';
+import { indexesReady, ping } from './database.js';
 import { errorHandler } from './errors.js';
 import { logger } from './logger.js';
 import { accountRouter } from './routes/account.js';
@@ -77,12 +77,27 @@ export function createApp(): Express {
     }),
   );
 
+  /**
+   * Liveness + database connectivity probe.
+   *
+   * Returns **503 when Mongo is unreachable**: load balancers and orchestrators
+   * route on the status code, so a 200 carrying `"database": "down"` would keep
+   * a broken instance in rotation serving errors.
+   *
+   * It pings rather than reporting what `connect()` returned at boot — a client
+   * object outlives an outage and would happily claim a connection that stopped
+   * working an hour ago.
+   */
   app.get('/health', (_req, res) => {
-    res.json({
-      status: true,
-      service: 'ChatBucket B2B Backend (Node)',
-      database: 'up',
-      indexes: indexesReady() ? 'ready' : 'pending',
+    void ping().then((dbOk) => {
+      res.status(dbOk ? 200 : 503).json({
+        status: dbOk,
+        service: 'ChatBucket B2B Backend (Node)',
+        database: dbOk ? 'up' : 'down',
+        // Informational: a lasting "pending" means the index retry is stuck and
+        // uniqueness is running on the fallback check in `register`.
+        indexes: indexesReady() ? 'ready' : 'pending',
+      });
     });
   });
 

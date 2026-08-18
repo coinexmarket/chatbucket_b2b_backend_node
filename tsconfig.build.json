@@ -1,0 +1,17 @@
+{
+  // The production build. Separate from tsconfig.json because that one also
+  // type-checks the test suites — useful in the editor and in CI, wrong in a
+  // shipped image, where `dist/test` would be dead code that still has to be
+  // audited and still shows up in a vulnerability scan.
+  //
+  // `rootDir: "src"` puts the output at dist/server.js rather than
+  // dist/src/server.js, which is what package.json's `start` script names.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "sourceMap": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "test"]
+}

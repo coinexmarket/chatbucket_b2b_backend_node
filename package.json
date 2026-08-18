@@ -1,7 +1,7 @@
 {
   "name": "chatbucket-b2b-backend",
   "version": "1.0.0",
-  "description": "ChatBucket B2B backend \u2014 Node.js port of the FastAPI service",
+  "description": "ChatBucket B2B backend — Node.js port of the FastAPI service",
   "private": true,
   "type": "module",
   "engines": {
@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx test/smoke.ts",
@@ -27,7 +27,7 @@
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
     "mongodb": "^6.12.0",
-    "nodemailer": "^6.9.16",
+    "nodemailer": "^9.0.5",
     "zod": "^3.24.1"
   },
   "devDependencies": {
