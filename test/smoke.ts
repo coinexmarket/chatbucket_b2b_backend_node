@@ -506,8 +506,40 @@ async function main(): Promise<void> {
     check('summary responds', r.status === 200, r.text);
     check('with a per-service split', Array.isArray(r.json?.data?.by_service), r.text);
 
-    r = await authed('GET', '/usage/timeseries?granularity=daily');
+    // The property a "does it respond" check cannot see: EVERY day in the range
+    // is returned, including the ones with no usage. Dropping empty buckets
+    // makes a quiet Tuesday vanish from the chart's x-axis.
+    r = await authed('GET', '/usage/timeseries?granularity=daily&from=2026-04-01&to=2026-04-10');
     check('timeseries responds', r.status === 200, r.text);
+    check('and returns one bucket per day, gaps filled', r.json?.count === 10, String(r.json?.count));
+    check(
+      'the empty days are zeroes, not omissions',
+      r.json?.data?.every((b: any) => typeof b.cost === 'number' && typeof b.requests === 'number'),
+      JSON.stringify(r.json?.data?.slice(0, 2)),
+    );
+    check(
+      'the first bucket is the requested start',
+      r.json?.data?.[0]?.bucket === '2026-04-01',
+      String(r.json?.data?.[0]?.bucket),
+    );
+    check('and totals accompany the series', typeof r.json?.totals?.cost === 'number', r.text);
+
+    r = await authed('GET', '/usage/timeseries?granularity=minute');
+    check('minute granularity is supported', r.status === 200, r.text);
+    check('defaulting to a 6-hour window (361 buckets)', r.json?.count === 361, String(r.json?.count));
+
+    // Bounded, because a minute query over a year is 525,600 buckets.
+    r = await authed('GET', '/usage/timeseries?granularity=minute&from=2025-01-01&to=2026-01-01');
+    check('an over-wide minute range -> 400', r.status === 400, r.text);
+    check(
+      'and says how to fix it',
+      String(r.json?.detail ?? '').includes('coarser granularity'),
+      r.text,
+    );
+
+    r = await authed('GET', '/usage/timeseries?granularity=daily&from=2026-04-10&to=2026-04-01');
+    check('a backwards range -> 400', r.status === 400, r.text);
+
     r = await authed('GET', '/usage/timeseries?granularity=nonsense');
     check('an unknown granularity -> 400', r.status === 400, r.text);
 

@@ -15,9 +15,10 @@
     "test": "tsx test/smoke.ts",
     "test:parity": "tsx test/parity.ts",
     "test:schema": "tsx test/schema-parity.ts",
-    "test:all": "npm run test:parity && npm run test:schema && npm run test:templates && npm run test:scheduler && npm test",
+    "test:all": "npm run test:parity && npm run test:schema && npm run test:analytics && npm run test:templates && npm run test:scheduler && npm test",
     "test:templates": "tsx test/templates.ts",
-    "test:scheduler": "tsx test/scheduler.ts"
+    "test:scheduler": "tsx test/scheduler.ts",
+    "test:analytics": "tsx test/analytics.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

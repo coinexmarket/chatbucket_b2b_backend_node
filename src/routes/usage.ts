@@ -19,6 +19,7 @@ import { Router, type Request, type Response } from 'express';
 import { MongoServerError, ObjectId } from 'mongodb';
 import { z } from 'zod';
 
+import * as analytics from '../analytics.js';
 import { getSettings } from '../config.js';
 import { indexesReady, usageCollection } from '../database.js';
 import { HttpError, asyncHandler } from '../errors.js';
@@ -244,6 +245,11 @@ async function enforcePlanLimit(
 
 function findReplay(userId: unknown, idempotencyKey: string) {
   return usageCollection().findOne({ user_id: userId, idempotency_key: idempotencyKey });
+}
+
+/** Four decimal places, matching the precision quantities are stored at. */
+function round4(n: number): number {
+  return Math.round(n * 10_000) / 10_000;
 }
 
 function chargeDescription(doc: Record<string, unknown>): string {
@@ -558,42 +564,77 @@ usageRouter.get(
   }),
 );
 
+/**
+ * Spend, requests and quantity bucketed over time, for the usage charts.
+ *
+ * Buckets with no usage are returned as **zeroes rather than omitted**:
+ * dropping them would make a quiet day vanish from the x-axis instead of
+ * showing as a flat line, so the chart would misrepresent the month.
+ */
 usageRouter.get(
   '/timeseries',
   requireUser,
   asyncHandler(async (req: Request, res) => {
     const user = (req as AuthedRequest).user;
-    const granularity = String(req.query['granularity'] ?? 'daily');
-    if (!['hourly', 'daily', 'monthly'].includes(granularity)) {
-      throw new HttpError(400, 'granularity must be hourly, daily or monthly.');
+
+    let gran;
+    let begin: Date;
+    let finish: Date;
+    try {
+      gran = analytics.getGranularity(req.query['granularity'] as string | undefined);
+      [begin, finish] = analytics.resolveRange(
+        gran,
+        req.query['from'] as string | undefined,
+        req.query['to'] as string | undefined,
+      );
+    } catch (err) {
+      // Both a bad granularity and an over-wide range are the caller's mistake,
+      // and the message says which — a bare 400 would leave the dashboard
+      // unable to explain itself.
+      throw new HttpError(400, err instanceof Error ? err.message : 'Invalid range.');
     }
-    const format =
-      granularity === 'hourly' ? '%Y-%m-%dT%H:00:00Z' : granularity === 'monthly' ? '%Y-%m' : '%Y-%m-%d';
+
+    const query = scope(user, req.query);
+    query['created_at'] = { $gte: analytics.truncate(begin, gran), $lte: finish };
 
     const rows = await usageCollection()
       .aggregate([
-        { $match: scope(user, req.query) },
+        { $match: query },
         {
           $group: {
-            _id: { $dateToString: { format, date: '$created_at', timezone: 'UTC' } },
+            _id: { $dateToString: { format: gran.fmt, date: '$created_at' } },
             cost: { $sum: '$cost' },
-            calls: { $sum: 1 },
             quantity: { $sum: '$quantity' },
+            requests: { $sum: 1 },
           },
         },
-        { $sort: { _id: 1 } },
       ])
       .toArray();
+    const found = new Map(rows.map((r) => [String(r['_id']), r]));
+
+    const buckets = analytics.bucketLabels(begin, finish, gran).map((label) => {
+      const row = found.get(label);
+      return {
+        bucket: label,
+        cost: row ? toJson((row['cost'] ?? 0) as AmountLike) : 0,
+        quantity: row ? round4(Number(row['quantity'] ?? 0)) : 0,
+        requests: row ? Number(row['requests'] ?? 0) : 0,
+      };
+    });
 
     res.json({
       status: true,
-      granularity,
-      data: rows.map((r) => ({
-        period: r['_id'],
-        cost: toJson((r['cost'] ?? 0) as AmountLike),
-        calls: Number(r['calls'] ?? 0),
-        quantity: Number(r['quantity'] ?? 0),
-      })),
+      granularity: gran.key,
+      from: begin.toISOString(),
+      to: finish.toISOString(),
+      currency: 'INR',
+      totals: {
+        cost: toJson(sumOf(buckets.map((b) => b.cost))),
+        requests: buckets.reduce((n, b) => n + b.requests, 0),
+        quantity: round4(buckets.reduce((n, b) => n + b.quantity, 0)),
+      },
+      count: buckets.length,
+      data: buckets,
     });
   }),
 );
