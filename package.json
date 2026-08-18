@@ -21,7 +21,8 @@
     "test:analytics": "tsx test/analytics.ts",
     "emails": "node scripts/send-test-emails.mjs",
     "set-status": "node scripts/set-status.mjs",
-    "test:hardening": "tsx test/hardening.ts"
+    "test:hardening": "tsx test/hardening.ts",
+    "set-app-secrets": "node scripts/set-app-secrets.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",
