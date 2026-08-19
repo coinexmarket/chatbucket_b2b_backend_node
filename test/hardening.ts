@@ -226,5 +226,40 @@ check(
 check('while keeping _id, which the frontend reads', loaded['_id'] === 'abc');
 check('and the non-secret profile fields', loaded['how_did_you_hear'] === 'Google Search');
 
+// --- Email validation agrees with pydantic -----------------------------------
+//
+// zod's `.email()` and pydantic's `EmailStr` disagree on exactly one thing:
+// the RFC 6761 reserved TLDs, which can never receive mail. Found by diffing
+// the live services, where the same login attempt returned 401 from Node and
+// 422 from Python. Left alone, this service would accept a registration the
+// other half of the system considers invalid.
+
+const { RegisterRequest } = await import('../src/schemas/auth.js');
+
+const EMAILS: Array<[string, boolean]> = [
+  ['nobody@example.invalid', false],
+  ['someone@thing.test', false],
+  ['user@localhost', false],
+  ['a@b', false],
+  ['no-tld@example', false],
+  ['ok@example.com', true],
+  ['x@sub.example.co.uk', true],
+];
+
+for (const [address, shouldPass] of EMAILS) {
+  const result = RegisterRequest.safeParse({
+    name: 'Ada',
+    email: address,
+    password: 'supersecret1',
+    mobile: '+919000000123',
+    acceptTerms: true,
+  });
+  check(
+    `${shouldPass ? 'accepts' : 'rejects'} ${address}`,
+    result.success === shouldPass,
+    `got ${result.success ? 'accepted' : 'rejected'}`,
+  );
+}
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 if (failed > 0) process.exit(1);

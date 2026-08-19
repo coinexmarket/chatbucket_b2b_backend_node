@@ -61,10 +61,27 @@ const phone = z.string().transform((value, ctx) => {
  * a trailing space got a 422 here and a 201 from the Python service, which is
  * precisely the kind of divergence that makes a split-traffic cutover unsafe.
  */
+/**
+ * Domains reserved by RFC 6761, which can never receive mail.
+ *
+ * pydantic's `EmailStr` refuses them and zod's `.email()` does not — the one
+ * place the two validators disagreed when the live services were diffed. Left
+ * alone, this service would accept a registration the Python one rejects, so an
+ * address could exist here that the other half of the system considers invalid.
+ */
+const UNROUTABLE_TLDS = new Set(['invalid', 'test', 'localhost', 'example']);
+
 export const email = z
   .string()
   .transform((v) => v.trim().toLowerCase())
-  .pipe(z.string().email('Enter a valid email address.'));
+  .pipe(z.string().email('Enter a valid email address.'))
+  .refine(
+    (address) => {
+      const tld = address.split('@')[1]?.split('.').pop() ?? '';
+      return !UNROUTABLE_TLDS.has(tld);
+    },
+    { message: 'Enter a valid email address.' },
+  );
 
 /**
  * Accept `snake_case` alongside the canonical `camelCase` key.
