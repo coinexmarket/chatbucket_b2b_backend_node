@@ -233,4 +233,14 @@ jobs:
           echo "health never reported the database up after the deploy" >&2
           exit 1
         env:
-          HEALTH_URL: https://api-node.b2b.chatbucket.business/health
+          # The App Platform hostname, not the custom domain. This step asks one
+          # question — did the deployment come up serving the new image — and the
+          # default ingress answers it the moment the deploy is live. Pointing it
+          # at the custom domain folds a second, unrelated dependency into the
+          # answer: a DNS record that lives outside this repository and outside
+          # DigitalOcean. While that record is missing the release is failed by a
+          # name that never resolves, long after the image is built, pushed and
+          # running. The custom domain is still PRIMARY in `.do/app.yaml` and is
+          # what customers reach; it is simply not what tells CI the deploy
+          # worked.
+          HEALTH_URL: https://chatbucket-b2b-backend-node-8ltfr.ondigitalocean.app/health
