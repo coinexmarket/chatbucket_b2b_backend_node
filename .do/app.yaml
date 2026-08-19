@@ -3,30 +3,41 @@
 # Secrets are redacted: this spec is committed, and the live values are held
 # encrypted by App Platform.
 #
-# DEPLOYED ALONGSIDE THE PYTHON SERVICE, NOT INSTEAD OF IT.
-# ---------------------------------------------------------
-# Its own name and its own hostname, so both can run against the same database
-# and be compared request by request before anything is cut over. Nothing here
-# touches api.b2b.chatbucket.business; pointing that at this service is a
-# separate, deliberate change, made once the two agree.
+# THIS SERVICE SERVES api.b2b.chatbucket.business.
+# -------------------------------------------------
+# It was built to run alongside the Python service on a hostname of its own, so
+# the two could be compared request by request against one shared database. That
+# comparison happened and the cutover followed: the Python app released the
+# domain, this one claimed it, and the old hostname stays as an alias so nothing
+# that learned it breaks.
+#
+# The domains below are therefore load-bearing. api.b2b is what the dashboard,
+# the payment gateway's registered webhook and every existing client call.
+# Editing it here and re-applying this spec takes the live API down.
 #
 # Two settings below are the ones that will bite if they are wrong:
 #
-#   JWT_SECRET must be IDENTICAL to the Python service's. Tokens issued by one
-#   have to be accepted by the other while traffic is split, and verification
-#   codes are HMAC'd under it — a different value silently invalidates every
-#   outstanding OTP and signs everybody out mid-session.
+#   JWT_SECRET must be IDENTICAL to the Python service's. Every live session
+#   token and every outstanding OTP was signed under that value while Python
+#   served this hostname, and none of them expired because the traffic moved —
+#   a different value signs those customers out and voids their codes.
 #
 #   NOTIFICATION_SCHEDULER_ENABLED must be true in AT MOST ONE service. Both
 #   would not double-send — the (job, period) lock is shared through Mongo — but
-#   one service should own the lifecycle mail, and while the Python service owns
-#   it this stays false.
+#   one service should own the lifecycle mail. The Python app is still deployed
+#   as the rollback and still owns it, so this stays false until that app is
+#   retired; whoever retires it has to flip this in the same change.
 name: chatbucket-b2b-backend-node
 region: blr
 
 domains:
-- domain: api-node.b2b.chatbucket.business
+- domain: api.b2b.chatbucket.business
   type: PRIMARY
+# Kept so the name the service was tested under keeps working. No DNS record
+# points at it today; it costs nothing and removing it would strand anything
+# still holding it.
+- domain: api-node.b2b.chatbucket.business
+  type: ALIAS
 
 ingress:
   rules:
