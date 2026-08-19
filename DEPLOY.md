@@ -1,10 +1,13 @@
 # Deploying the Node service
 
 This service is designed to be deployed **alongside** the Python one, not in
-place of it. Both read and write the same MongoDB, so you can run them together,
-compare their answers on real traffic, and only then move the domain. Nothing in
-this document points `api.b2b.chatbucket.business` at Node; that is a separate,
-deliberate change described in [Cutting over](#cutting-over).
+place of it. Both read and write the same MongoDB, which is what allowed them to
+run together and be compared on real traffic before anything moved.
+
+That comparison happened and the domain has since moved: **`api.b2b.chatbucket.business`
+is served by this app.** The Python app is still deployed, with no domain
+attached, as the rollback — see [Cutting over](#cutting-over) for what was done
+and how to undo it.
 
 ---
 
@@ -134,10 +137,13 @@ Merge to `main`. That is the whole procedure:
 2. `publish` builds, Trivy-scans, boots the image, then pushes
    `:<commit-sha>` followed by `:latest`.
 3. App Platform sees `latest` move and deploys it.
-4. The workflow waits for `https://api-node.b2b.chatbucket.business/health` to
-   report `"database":"up"` before it reports success — App Platform reacts
+4. The workflow waits for the App Platform hostname's `/health` to report
+   `"database":"up"` before it reports success — App Platform reacts
    asynchronously, so reporting success at upload would be reporting that the
-   file arrived, not that the service works.
+   file arrived, not that the service works. It deliberately checks
+   `…-8ltfr.ondigitalocean.app` rather than the custom domain: that name exists
+   as soon as the app does, so the step reports on the deployment instead of on
+   a DNS record that lives outside this repository.
 
 To rebuild and ship without an empty commit: **Actions → Build, test and deploy →
 Run workflow**.
@@ -150,7 +156,7 @@ The service starts even when Mongo is briefly unreachable and reports 503 with
 `"database":"down"` until it recovers, so `/health` genuinely reflects readiness:
 
 ```bash
-curl -s https://api-node.b2b.chatbucket.business/health
+curl -s https://api.b2b.chatbucket.business/health
 # {"status":true,"service":"ChatBucket B2B Backend (Node)","database":"up","indexes":"ready"}
 ```
 
@@ -184,13 +190,29 @@ Two differences are expected and named in the harness: Python prints `4.0` where
 JavaScript prints `4`, and timestamps end `+00:00` rather than `Z`. Same values,
 same instants.
 
-When it is clean:
+### What was actually done
 
-1. Point `api.b2b.chatbucket.business` at the Node app, or move the ingress rule.
-2. Move `NOTIFICATION_SCHEDULER_ENABLED=true` from the Python app to this one —
-   in that order, so neither owns it for a moment rather than both.
-3. Leave the Python app running and reachable on its own hostname. It is the
-   rollback.
+The domain moved on 19 August 2026, in this order — the order is forced, because
+App Platform will not issue a certificate for a name until DNS already points at
+the app, and it will not let two apps claim the same hostname:
+
+1. The Python app released `api.b2b.chatbucket.business` from its spec.
+2. This app claimed it as PRIMARY, keeping `api-node.b2b` as an ALIAS.
+3. The CNAME at the registrar was repointed to this app's App Platform hostname.
+4. App Platform issued the certificate and the domain reached `ACTIVE`.
+
+There is an unavoidable gap between 1 and 4 where the hostname serves nothing:
+the certificate cannot be issued before DNS points at the new app. Lower the
+record's TTL an hour beforehand and do it at a quiet time.
+
+The webhook URL did not change — it was already `api.b2b`, so it kept working
+across the move; only what answers behind it changed.
+
+Still outstanding: `NOTIFICATION_SCHEDULER_ENABLED` remains `true` on the Python
+app and `false` here, because that app is still deployed as the rollback. Move
+it in that order — Python first — so neither owns the lifecycle mail for a
+moment rather than both. Whoever retires the Python app must do this in the same
+change, or nobody sends it.
 
 ---
 
@@ -253,7 +275,7 @@ webhook means a customer who paid never receives their credits.
 Point the gateway's webhook at:
 
 ```
-https://api-node.b2b.chatbucket.business/billing/webhook/razorpay
+https://api.b2b.chatbucket.business/billing/webhook/razorpay
 ```
 
 **No proxy in that path may re-encode the body.** The signature covers the exact
