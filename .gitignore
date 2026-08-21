@@ -1,7 +1,13 @@
 node_modules/
 dist/
+# Every .env variant, not just the two that were thought of. A file named
+# `.env.backup-20260821` carries exactly the same secrets as `.env`, and this
+# repository is public, so the pattern has to cover the copies people actually
+# make rather than the ones anticipated here. `.env.example` is exempted: it is
+# the documented shape, and every value in it is empty or a local default.
 .env
-.env.local
+.env.*
+!.env.example
 *.log
 .DS_Store
 coverage/
