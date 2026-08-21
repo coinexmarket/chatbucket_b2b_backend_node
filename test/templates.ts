@@ -1,5 +1,9 @@
 export {}; // Marks this file a module, so top-level `await` below is allowed.
 
+// Guard first: the suites drop their database, and MONGODB_URI comes from
+// .env, which may point at production.
+await import('./local-only.js');
+
 /**
  * Every email template renders, and renders safely.
  *
