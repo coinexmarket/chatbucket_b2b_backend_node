@@ -10,6 +10,10 @@
  */
 export {}; // Marks this file a module, so top-level `await` below is allowed.
 
+// Guard first: the suites drop their database, and MONGODB_URI comes from
+// .env, which may point at production.
+await import('./local-only.js');
+
 // Set before importing anything from src: `getSettings()` reads the environment
 // once and caches it, so a later assignment would be silently ignored.
 process.env['ENVIRONMENT'] = 'development';

@@ -76,12 +76,18 @@ type}]}` shape, because the UI reads it per field.
 
 ```bash
 npm install
-cp .env.example .env      # set JWT_SECRET to the SAME value as the Python service
+cp .env.example .env
 npm run dev               # http://127.0.0.1:8001
 ```
 
-Port 8001 by default, so it runs **alongside** the Python service on 8000 and the
-two can be compared request by request.
+That runs against a local MongoDB with every credential blank, which is the
+right default. To run against the **production** database instead — real
+customer records, and three settings that must stay off or a local experiment
+reaches a customer — see **[LOCAL_SETUP.md](LOCAL_SETUP.md)**.
+
+Port 8001 by default. That was chosen so this could run alongside the Python
+service on 8000 and be compared request by request; that service was retired on
+20 August 2026, and the port simply stayed.
 
 ```bash
 npm run typecheck         # tsc --noEmit, strict
